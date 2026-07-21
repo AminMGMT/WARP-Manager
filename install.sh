@@ -27,7 +27,7 @@ _draw_bar() {   # label pct
 
 progress_run() {   # label cmd...
     local label="$1"; shift
-    ( "$@" ) >>"$INSTALL_LOG" 2>&1 &
+    ( "$@" ) </dev/null >>"$INSTALL_LOG" 2>&1 &
     local pid=$! pct=0 rc=0
     while kill -0 "$pid" 2>/dev/null; do
         pct=$(( pct < 92 ? pct + 3 : 92 ))
@@ -96,14 +96,23 @@ step_generate() {
     systemctl enable --now warp-manager-refresh.timer >/dev/null 2>&1 || true
 }
 
+# show the real reason then stop
+fail() {
+    printf '\n%s%s%s\n' "$C_RED$C_BOLD" "$1" "$C_RESET"
+    printf '%s──── last 25 lines of %s ────%s\n' "$C_GRAY" "$INSTALL_LOG" "$C_RESET"
+    tail -n 25 "$INSTALL_LOG" 2>/dev/null
+    printf '%s────────────────────────────────────────────────%s\n' "$C_GRAY" "$C_RESET"
+    exit 1
+}
+
 # --- run -----------------------------------------------------------------
 clear 2>/dev/null || true
 printf '%s  WARP Manager — Installer%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
 
-progress_run "Installing Dependencies" step_deps     || die "Dependency install failed. See $INSTALL_LOG"
-progress_run "Copying Files"           step_copy     || die "Copy failed. See $INSTALL_LOG"
-progress_run "Preparing WARP"          step_prepare  || die "WARP registration failed. See $INSTALL_LOG"
-progress_run "Generating Profile"      step_generate || die "WARP setup failed. See $INSTALL_LOG"
+progress_run "Installing Dependencies" step_deps     || fail "Dependency install failed."
+progress_run "Copying Files"           step_copy     || fail "Copy failed."
+progress_run "Preparing WARP"          step_prepare  || fail "WARP registration failed."
+progress_run "Generating Profile"      step_generate || fail "WARP setup failed."
 
 printf '\n%s  WARP is Ready%s : %ssudo wm%s\n\n' "$C_BOLD$C_GREEN" "$C_RESET" "$C_WHITE" "$C_RESET"
 sleep 1
