@@ -7,22 +7,34 @@ WARP_MTU="${WARP_MTU:-1280}"
 
 # --- install the wgcf helper binary --------------------------------------
 wgcf_install() {
-    [[ -x "$WM_WGCF_BIN" ]] && return 0
+    if [[ -x "$WM_WGCF_BIN" ]] && "$WM_WGCF_BIN" --version >/dev/null 2>&1; then return 0; fi
     log_step "Installing wgcf..."
-    local arch tag url
+    local arch
     case "$(uname -m)" in
         x86_64|amd64) arch="amd64" ;;
         aarch64|arm64) arch="arm64" ;;
         armv7l|armhf) arch="armv7" ;;
         *) die "Unsupported architecture for wgcf: $(uname -m)" ;;
     esac
-    tag="$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-            | grep -oP '"tag_name":\s*"\K[^"]+' | head -n1)"
-    [[ -n "$tag" ]] || tag="v2.2.22"
-    url="https://github.com/ViRb3/wgcf/releases/download/${tag}/wgcf_${tag#v}_linux_${arch}"
-    curl -fsSL -o "$WM_WGCF_BIN" "$url" || die "Failed to download wgcf."
-    chmod +x "$WM_WGCF_BIN"
-    log_info "wgcf ${tag} installed."
+    # candidate versions: latest from the API first, then known-good fallbacks
+    local -a tags=()
+    local latest
+    latest="$(curl -fsSL --connect-timeout 10 https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null \
+              | grep -oP '"tag_name":\s*"\K[^"]+' | head -n1)"
+    [[ -n "$latest" ]] && tags+=("$latest")
+    tags+=(v2.2.27 v2.2.24 v2.2.22 v2.2.19)
+    local tag url
+    for tag in "${tags[@]}"; do
+        url="https://github.com/ViRb3/wgcf/releases/download/${tag}/wgcf_${tag#v}_linux_${arch}"
+        log_step "  trying wgcf ${tag}..."
+        if curl -fsSL --connect-timeout 15 -o "$WM_WGCF_BIN" "$url" && chmod +x "$WM_WGCF_BIN" \
+           && "$WM_WGCF_BIN" --version >/dev/null 2>&1; then
+            log_info "wgcf ${tag} installed."
+            return 0
+        fi
+        log_warn "  wgcf ${tag} did not work (download/exec failed)."
+    done
+    die "Could not install a working wgcf binary (network/GitHub blocked?). Last URL: $url"
 }
 
 # --- register a WARP account & generate a profile ------------------------
@@ -30,17 +42,41 @@ warp_register() {
     ensure_dirs
     wgcf_install
     cd "$WM_WGCF_DIR" || die "Could not cd into $WM_WGCF_DIR."
-    if [[ ! -f "$WM_WGCF_DIR/wgcf-account.toml" ]]; then
+    local acct="$WM_WGCF_DIR/wgcf-account.toml"
+    # drop an empty/corrupt leftover so wgcf won't refuse to overwrite it
+    [[ -f "$acct" && ! -s "$acct" ]] && rm -f "$acct"
+
+    if [[ ! -s "$acct" ]]; then
         log_step "Registering a WARP account..."
-        local n=0
-        until "$WM_WGCF_BIN" register --accept-tos >/dev/null 2>&1; do
-            n=$((n+1)); [[ $n -ge 5 ]] && die "WARP account registration failed after several attempts."
-            log_warn "Retrying WARP registration ($n)..."; sleep 3
+        local n=0 out
+        while [[ ! -s "$acct" ]]; do
+            out="$("$WM_WGCF_BIN" register --accept-tos </dev/null 2>&1)"
+            # success = the account file now exists (ignore wgcf's exit code, which
+            # can be non-zero even after the account was created), or wgcf reports
+            # an account already exists.
+            [[ -s "$acct" ]] && break
+            grep -qi 'existing account' <<<"$out" && break
+            n=$((n+1))
+            if [[ $n -ge 5 ]]; then
+                log_error "wgcf register failed. Last output:"; printf '%s\n' "$out" >&2
+                die "WARP account registration failed after several attempts."
+            fi
+            log_warn "Retrying WARP registration ($n)..."; sleep 5
         done
     fi
+
     log_step "Generating WireGuard profile..."
-    "$WM_WGCF_BIN" generate --profile "$WM_WGCF_DIR/wgcf-profile.conf" >/dev/null 2>&1 \
-        || die "Failed to generate wgcf profile."
+    local gout
+    if ! gout="$("$WM_WGCF_BIN" generate --profile "$WM_WGCF_DIR/wgcf-profile.conf" </dev/null 2>&1)"; then
+        # a corrupt account can break generate: reset once and retry a fresh register
+        log_warn "generate failed ($gout); re-registering a fresh account..."
+        rm -f "$acct" "$WM_WGCF_DIR/wgcf-profile.conf"
+        "$WM_WGCF_BIN" register --accept-tos </dev/null >/dev/null 2>&1 || true
+        if ! gout="$("$WM_WGCF_BIN" generate --profile "$WM_WGCF_DIR/wgcf-profile.conf" </dev/null 2>&1)"; then
+            log_error "wgcf generate failed: $gout"
+            die "Failed to generate wgcf profile."
+        fi
+    fi
     log_info "WARP account is ready."
 }
 
