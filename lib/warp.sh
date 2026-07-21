@@ -200,6 +200,7 @@ warp_down() {
     require_root
     systemctl disable "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
     systemctl stop "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
+    rm -f "$WM_EXIT_IP_CACHE"        # stale IP must not linger in the header
     log_info "WARP interface stopped."
 }
 
@@ -232,25 +233,39 @@ warp_status_short() {
     fi
 }
 
-# Query the exit identity as seen *through* WARP (forces egress via the wgcf device)
+# Query the exit identity as seen *through* WARP (forces egress via the wgcf device).
+# Bounded by --max-time so a dead tunnel can never hang the caller; the result is
+# cached so the menu header can render instantly without touching the network.
 warp_trace_ip() {
     warp_is_up || { echo "-"; return; }
-    curl -s --interface "$WM_IFACE" --connect-timeout 5 "$CF_TRACE_URL" 2>/dev/null \
-        | awk -F= '/^ip=/{ip=$2} /^warp=/{w=$2} END{if(ip!="")printf "%s (warp=%s)",ip,w; else print "-"}'
+    local out
+    out="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null \
+        | awk -F= '/^ip=/{ip=$2} /^warp=/{w=$2} END{if(ip!="")printf "%s (warp=%s)",ip,w; else print "-"}')"
+    [[ -z "$out" ]] && out="-"
+    # refresh the cache only on a real answer, so a transient failure keeps the last IP
+    [[ "$out" != "-" ]] && printf '%s' "$out" >"$WM_EXIT_IP_CACHE" 2>/dev/null
+    printf '%s\n' "$out"
+}
+
+# Instant, non-blocking exit IP for the menu header: reads the cached value only.
+# Never touches the network, so redrawing a menu is always fast.
+warp_exit_ip_cached() {
+    warp_is_up || { echo "-"; return; }
+    if [[ -s "$WM_EXIT_IP_CACHE" ]]; then cat "$WM_EXIT_IP_CACHE"; else echo "-"; fi
 }
 
 # Show geo/location of the WARP exit (country + Cloudflare datacenter + city).
 warp_location() {
     warp_is_up || { echo "WARP is not running."; return; }
     local t ip loc colo
-    t="$(curl -s --interface "$WM_IFACE" --connect-timeout 6 "$CF_TRACE_URL" 2>/dev/null)"
+    t="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null)"
     ip="$(awk -F= '/^ip=/{print $2}' <<<"$t")"
     loc="$(awk -F= '/^loc=/{print $2}' <<<"$t")"
     colo="$(awk -F= '/^colo=/{print $2}' <<<"$t")"
     [[ -z "$ip" ]] && { echo "Could not reach Cloudflare through WARP."; return; }
     # bonus: city/org via ipinfo (best effort, may be unavailable)
     local city org info
-    info="$(curl -s --interface "$WM_IFACE" --connect-timeout 5 "https://ipinfo.io/${ip}/json" 2>/dev/null)"
+    info="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "https://ipinfo.io/${ip}/json" 2>/dev/null)"
     city="$(grep -oP '"city":\s*"\K[^"]+' <<<"$info" 2>/dev/null)"
     org="$(grep -oP '"org":\s*"\K[^"]+'  <<<"$info" 2>/dev/null)"
     printf 'IP:          %s\n' "$ip"
@@ -306,7 +321,7 @@ warp_clear_license() {
 # Report WARP account type (WARP vs WARP+) via trace warp= field.
 warp_plan() {
     warp_is_up || { echo "-"; return; }
-    local w; w="$(curl -s --interface "$WM_IFACE" --connect-timeout 5 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^warp=/{print $2}')"
+    local w; w="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^warp=/{print $2}')"
     case "$w" in
         plus) echo "WARP+" ;;
         on)   echo "WARP" ;;

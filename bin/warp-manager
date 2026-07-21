@@ -40,7 +40,8 @@ status_line() {
     local warp_state eng_state exit_ip
     if warp_is_up; then warp_state="${C_GREEN}● up${C_RESET}"; else warp_state="${C_RED}○ down${C_RESET}"; fi
     if singbox_is_up; then eng_state="${C_GREEN}● on${C_RESET}"; else eng_state="${C_RED}○ off${C_RESET}"; fi
-    exit_ip="$(warp_is_up && warp_trace_ip || echo '-')"
+    # header must be instant: read the cached exit IP, never probe the network here
+    exit_ip="$(warp_exit_ip_cached)"
     hr
     printf ' %sWARP%s %-16b  %sEngine%s %-16b  %sExit IP%s %s\n' \
         "$C_PRIMARY$C_BOLD" "$C_RESET" "$warp_state" \
@@ -136,6 +137,7 @@ engine_apply() {
     singbox_reload || return 1
     routing_installed || routing_apply
     routing_load_exclusions
+    warp_trace_ip >/dev/null 2>&1 || true   # warm the exit-IP cache for the header
 }
 
 apply_pretty() {
@@ -159,6 +161,7 @@ apply_pretty() {
     if singbox_reload; then
         routing_installed || routing_apply
         routing_load_exclusions
+        warp_trace_ip >/dev/null 2>&1 || true   # warm the exit-IP cache for the header
         printf ' %sApplied. Selected services route through WARP (apps + web).%s\n' "$C_GREEN" "$C_RESET"
     else
         printf ' %sFailed to apply — see the error above.%s\n' "$C_RED" "$C_RESET"
@@ -236,7 +239,7 @@ action_status() {
     printf ' %sRedirect%s    %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_installed && echo 'active (TCP 80/443 → sing-box)' || echo 'inactive')"
     echo
     printf ' %sConnectivity%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   Server direct : %s\n' "$(curl -s --connect-timeout 6 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
+    printf '   Server direct : %s\n' "$(curl -s --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
     printf '   Via WARP      : %s\n' "$(warp_trace_ip)"
     echo
     printf ' %sLocation%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"

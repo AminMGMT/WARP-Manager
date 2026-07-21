@@ -44,11 +44,14 @@ EOF
 # private/reserved ranges + the WARP endpoint IPs are never redirected
 routing_load_exclusions() {
     routing_installed || return 0
+    # Exclude both the WireGuard endpoint AND the registration API host, so wgcf's
+    # own HTTPS calls (register / generate / change-IP) are never redirected into
+    # sing-box — otherwise they get hijacked and fail with EOF.
     local ep4 ep6 tmp
-    ep4="$( { getent ahostsv4 "$WM_WARP_ENDPOINT_HOST" 2>/dev/null | awk '{print $1}';
-              dig +short A "$WM_WARP_ENDPOINT_HOST" 2>/dev/null; } | grep -E '^[0-9.]+$' | sort -u )"
-    ep6="$( { getent ahostsv6 "$WM_WARP_ENDPOINT_HOST" 2>/dev/null | awk '{print $1}';
-              dig +short AAAA "$WM_WARP_ENDPOINT_HOST" 2>/dev/null; } | grep -E '^[0-9A-Fa-f:]+$' | sort -u )"
+    ep4="$( { getent ahostsv4 "$WM_WARP_ENDPOINT_HOST" "$WM_WARP_API_HOST" 2>/dev/null | awk '{print $1}';
+              dig +short A "$WM_WARP_ENDPOINT_HOST" "$WM_WARP_API_HOST" 2>/dev/null; } | grep -E '^[0-9.]+$' | sort -u )"
+    ep6="$( { getent ahostsv6 "$WM_WARP_ENDPOINT_HOST" "$WM_WARP_API_HOST" 2>/dev/null | awk '{print $1}';
+              dig +short AAAA "$WM_WARP_ENDPOINT_HOST" "$WM_WARP_API_HOST" 2>/dev/null; } | grep -E '^[0-9A-Fa-f:]+$' | sort -u )"
 
     tmp="${WM_STATE_DIR}/xsets.nft"
     {

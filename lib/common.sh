@@ -40,8 +40,13 @@ WM_MARK_DIRECT="51889"                              # sing-box direct marker (lo
 
 CF_TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 
+# last-known WARP exit IP, cached so the menu header never blocks on the network
+WM_EXIT_IP_CACHE="${WM_STATE_DIR}/exit-ip"
+
 # WARP endpoint host (used to build the routing-loop exclusion set)
 WM_WARP_ENDPOINT_HOST="engage.cloudflareclient.com"
+# Cloudflare registration API host — must bypass the redirect so wgcf can register
+WM_WARP_API_HOST="api.cloudflareclient.com"
 
 # nftables exclusion sets (never route these via WARP -> avoids loops)
 WM_XSET4="warpx4"
