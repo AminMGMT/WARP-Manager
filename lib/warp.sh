@@ -6,8 +6,11 @@ WARP_ENDPOINT="${WARP_ENDPOINT:-engage.cloudflareclient.com:2408}"
 WARP_MTU="${WARP_MTU:-1280}"
 
 # --- install the wgcf helper binary --------------------------------------
+# true if the file exists and is a real ELF executable (not an HTML error page)
+_is_elf() { [[ -s "$1" ]] && head -c4 "$1" 2>/dev/null | grep -qa ELF; }
+
 wgcf_install() {
-    if [[ -x "$WM_WGCF_BIN" ]] && "$WM_WGCF_BIN" --version >/dev/null 2>&1; then return 0; fi
+    if [[ -x "$WM_WGCF_BIN" ]] && _is_elf "$WM_WGCF_BIN"; then return 0; fi
     log_step "Installing wgcf..."
     local arch
     case "$(uname -m)" in
@@ -27,12 +30,12 @@ wgcf_install() {
     for tag in "${tags[@]}"; do
         url="https://github.com/ViRb3/wgcf/releases/download/${tag}/wgcf_${tag#v}_linux_${arch}"
         log_step "  trying wgcf ${tag}..."
-        if curl -fsSL --connect-timeout 15 -o "$WM_WGCF_BIN" "$url" && chmod +x "$WM_WGCF_BIN" \
-           && "$WM_WGCF_BIN" --version >/dev/null 2>&1; then
+        if curl -fsSL --connect-timeout 15 -o "$WM_WGCF_BIN" "$url" && _is_elf "$WM_WGCF_BIN"; then
+            chmod +x "$WM_WGCF_BIN"
             log_info "wgcf ${tag} installed."
             return 0
         fi
-        log_warn "  wgcf ${tag} did not work (download/exec failed)."
+        log_warn "  wgcf ${tag} download failed."
     done
     die "Could not install a working wgcf binary (network/GitHub blocked?). Last URL: $url"
 }
