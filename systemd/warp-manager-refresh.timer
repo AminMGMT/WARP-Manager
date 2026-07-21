@@ -1,0 +1,10 @@
+[Unit]
+Description=WARP Manager - periodic refresh of routed IP sets
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

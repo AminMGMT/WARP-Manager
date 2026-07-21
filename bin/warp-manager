@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+# WARP Manager - selective Cloudflare WARP routing for a VPS exit node.
+# Routes chosen services (Google/Gemini, ChatGPT, ...) through WARP while the rest
+# of the traffic keeps the server's normal IP. Transparent: no Xray/panel changes.
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
+export WM_ROOT
+# shellcheck source=/dev/null
+for lib in common warp routing providers; do
+    src="${WM_ROOT}/lib/${lib}.sh"
+    [[ -f "$src" ]] || { echo "Library not found: $src" >&2; exit 1; }
+    source "$src"
+done
+
+# =========================================================================
+# UI helpers
+# =========================================================================
+hr()  { printf '%s────────────────────────────────────────────────────────────%s\n' "$C_GRAY" "$C_RESET"; }
+pause() { read -rp $'\n'"${C_DIM}Press Enter...${C_RESET}" _; }
+
+banner() {
+    clear 2>/dev/null || true
+    printf '%s' "$C_PRIMARY"
+    cat <<'EOF'
+ ██╗    ██╗ █████╗ ██████╗ ██████╗     ███╗   ███╗ ██████╗ ██████╗
+ ██║    ██║██╔══██╗██╔══██╗██╔══██╗    ████╗ ████║██╔════╝ ██╔══██╗
+ ██║ █╗ ██║███████║██████╔╝██████╔╝    ██╔████╔██║██║  ███╗██████╔╝
+ ██║███╗██║██╔══██║██╔══██╗██╔═══╝     ██║╚██╔╝██║██║   ██║██╔══██╗
+ ╚███╔███╔╝██║  ██║██║  ██║██║         ██║ ╚═╝ ██║╚██████╔╝██║  ██║
+  ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝         ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝
+EOF
+    printf '%s' "$C_RESET"
+    printf '      %sSelective Cloudflare WARP routing for your VPS%s\n' "$C_GRAY" "$C_RESET"
+    printf '      %sTeleGram : %s@BlackProtocols%s\n' "$C_GRAY" "$C_WHITE" "$C_RESET"
+}
+
+current_interval() { conf_get refresh_min "$WM_DEFAULT_REFRESH_MIN"; }
+
+status_line() {
+    local warp_state exit_ip
+    if warp_is_up; then warp_state="${C_GREEN}● running${C_RESET}"; else warp_state="${C_RED}○ stopped${C_RESET}"; fi
+    exit_ip="$(warp_is_up && warp_trace_ip || echo '-')"
+    hr
+    printf ' %sWARP%s %-18b   %sExit IP%s %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$warp_state" \
+        "$C_PRIMARY$C_BOLD" "$C_RESET" "${exit_ip:-–}"
+    hr
+}
+
+# =========================================================================
+# Groups   (data/groups.conf: GroupName|Display:id|Display:id|...)
+# =========================================================================
+group_names() { awk -F'|' '!/^#/ && NF>1 {print $1}' "$WM_GROUPS_FILE"; }
+# members of group N -> lines "Display<TAB>id"
+group_members() {
+    awk -F'|' -v n="$1" '!/^#/ && NF>1 { c++; if (c==n) { for(i=2;i<=NF;i++){ split($i,a,":"); print a[2]"\t"a[1] } } }' "$WM_GROUPS_FILE"
+}
+# all "id<TAB>Display" pairs across every group (for pretty apply naming)
+all_pairs() {
+    awk -F'|' '!/^#/ && NF>1 { for(i=2;i<=NF;i++){ split($i,a,":"); print a[2]"\t"a[1] } }' "$WM_GROUPS_FILE"
+}
+display_name() { all_pairs | awk -F'\t' -v id="$1" '$1==id{print $2; exit}'; }
+
+# ON if all members enabled, off if none, PARTIAL otherwise
+group_state() {
+    local n="$1" total=0 on=0 id
+    while IFS=$'\t' read -r id _; do
+        [[ -z "$id" ]] && continue
+        total=$((total+1)); provider_is_enabled "$id" && on=$((on+1))
+    done < <(group_members "$n")
+    if   [[ "$on" -eq 0 ]]; then echo off
+    elif [[ "$on" -eq "$total" ]]; then echo on
+    else echo partial; fi
+}
+group_toggle() {
+    local n="$1" id st; st="$(group_state "$n")"
+    while IFS=$'\t' read -r id _; do
+        [[ -z "$id" ]] && continue
+        if [[ "$st" == on ]]; then provider_disable "$id"; else provider_enable "$id"; fi
+    done < <(group_members "$n")
+}
+
+# =========================================================================
+# Choose services
+# =========================================================================
+menu_services() {
+    local -a gnames
+    mapfile -t gnames < <(group_names)
+    while true; do
+        banner
+        printf '\n %sChoose Services%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        local i=0 g mark members mline
+        for g in "${gnames[@]}"; do
+            i=$((i+1))
+            case "$(group_state "$i")" in
+                on)      mark="${C_GREEN}●${C_RESET}" ;;
+                partial) mark="${C_YELLOW}◐${C_RESET}" ;;
+                *)       mark="${C_GRAY}○${C_RESET}" ;;
+            esac
+            mline="$(group_members "$i" | awk -F'\t' '{printf (NR>1?", ":"")$2}')"
+            printf ' %s%d.%s %b %s%-13s%s %s[ %s ]%s\n' \
+                "$C_PRIMARY$C_BOLD" "$i" "$C_RESET" "$mark" "$C_WHITE" "$g" "$C_RESET" "$C_GRAY" "$mline" "$C_RESET"
+        done
+        printf '\n %sNumber%s toggle group   %s0%s back & apply\n\n' "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            0|"") apply_pretty; return ;;
+            *[!0-9]*) : ;;
+            *) [[ "$ch" -ge 1 && "$ch" -le ${#gnames[@]} ]] && group_toggle "$ch" ;;
+        esac
+    done
+}
+
+# =========================================================================
+# Apply — per-service Done/Failed, skip failures, load once
+# =========================================================================
+apply_pretty() {
+    banner
+    printf '\n %sApplying%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    if ! warp_is_up; then printf ' %sStarting WARP...%s\n' "$C_GRAY" "$C_RESET"; warp_up || { printf ' %sWARP failed to start.%s\n' "$C_RED" "$C_RESET"; pause; return; }; fi
+    routing_installed || routing_apply_skeleton
+    routing_load_exclusions
+
+    local v4 v6; v4="$(mktemp)"; v6="$(mktemp)"
+    local id name
+    while read -r id; do
+        [[ -z "$id" ]] && continue
+        [[ -f "$WM_PROVIDERS_DIR/${id}.conf" ]] || continue
+        name="$(display_name "$id")"; [[ -z "$name" ]] && name="$(prov_field "$id" name)"
+        printf '   %-22s ' "$name"
+        _GATHER_COUNT=0
+        _gather_provider "$id" "$v4" "$v6"
+        if [[ "${_GATHER_COUNT:-0}" -gt 0 ]]; then
+            printf '%sDone%s\n' "$C_GREEN" "$C_RESET"
+        else
+            printf '%sFailed%s\n' "$C_RED" "$C_RESET"
+        fi
+    done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
+
+    # custom domains (cached; only re-resolved when the custom file changed)
+    if [[ -s "$WM_CUSTOM_FILE" ]] && grep -qvE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE"; then
+        printf '   %-22s ' "Custom domains"
+        local before after
+        before=$(( $(wc -l <"$v4") + $(wc -l <"$v6") ))
+        _gather_custom "$v4" "$v6"
+        after=$(( $(wc -l <"$v4") + $(wc -l <"$v6") ))
+        [[ "$after" -gt "$before" ]] && printf '%sDone%s\n' "$C_GREEN" "$C_RESET" || printf '%sFailed%s\n' "$C_RED" "$C_RESET"
+    fi
+
+    echo
+    _providers_finalize "$v4" "$v6"
+    routing_reset_conntrack   # drop old WARP flows so disabled services go direct now
+    rm -f "$v4" "$v6" "${v4}.s" "${v6}.s"
+    pause
+}
+
+# =========================================================================
+# Custom domains
+# =========================================================================
+menu_custom_domains() {
+    while true; do
+        banner
+        printf '\n %sCustom Domains%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        if [[ -s "$WM_CUSTOM_FILE" ]] && grep -qvE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE"; then
+            grep -nvE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE" | sed 's/^/   /'
+        else
+            printf '   %s(none)%s\n' "$C_DIM" "$C_RESET"
+        fi
+        printf '\n %s+%s add   %s-%s remove   %s0%s back & apply\n\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            0|"") apply_pretty; return ;;
+            +)  read -rp " Domain: " d; [[ -n "$d" ]] && echo "$d" >>"$WM_CUSTOM_FILE" ;;
+            -)  read -rp " Domain to remove: " d
+                [[ -n "$d" ]] && { grep -vxF "$d" "$WM_CUSTOM_FILE" >"${WM_CUSTOM_FILE}.t" 2>/dev/null; mv -f "${WM_CUSTOM_FILE}.t" "$WM_CUSTOM_FILE"; } ;;
+        esac
+    done
+}
+
+# =========================================================================
+# Manage submenu
+# =========================================================================
+action_interval() {
+    banner
+    printf '\n %sAuto-Update IP interval%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    printf ' %sCurrently: every %s minutes%s\n\n' "$C_GRAY" "$(current_interval)" "$C_RESET"
+    read -rp " Minutes: " m
+    [[ "$m" =~ ^[0-9]+$ && "$m" -ge 1 ]] || { [[ -n "$m" ]] && log_error "Invalid number."; pause; return; }
+    conf_set refresh_min "$m"
+    if [[ -f "$WM_TIMER_FILE" ]]; then
+        sed -i "s|^OnUnitActiveSec=.*|OnUnitActiveSec=${m}min|" "$WM_TIMER_FILE"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl restart warp-manager-refresh.timer >/dev/null 2>&1 || true
+    fi
+    log_info "Auto-Update set to every ${m} minutes."
+    pause
+}
+
+action_change_ip() {
+    banner
+    printf '\n %sChange IP%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    printf ' Current IP: %s\n' "$(warp_trace_ip)"
+    read -rp $' Get a new WARP IP? [y/N]: ' yn
+    [[ "$yn" =~ ^[Yy]$ ]] || { echo " Cancelled."; pause; return; }
+    warp_change_ip
+    providers_refresh
+    echo; warp_location | sed 's/^/   /'
+    pause
+}
+
+menu_license() {
+    while true; do
+        banner
+        local cur; cur="$(conf_get license_key)"
+        printf '\n %sWARP+ License%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        if [[ -n "$cur" ]]; then
+            printf ' Current: %s%s%s   (plan: %s)\n' "$C_GREEN" "${cur:0:8}…${cur: -4}" "$C_RESET" "$(warp_plan)"
+        else
+            printf ' Current: %s(none — free WARP)%s\n' "$C_DIM" "$C_RESET"
+        fi
+        printf '\n %ss%s set/change   %sc%s clear   %s0%s back\n\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            s|S) read -rp " WARP+ key: " key
+                 [[ -n "$key" ]] && { warp_apply_license "$key" && { warp_write_conf; warp_up; providers_refresh; }; pause; } ;;
+            c|C) warp_clear_license; pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+action_status() {
+    banner
+    status_line
+    echo
+    printf ' %sPlan%s        %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(warp_is_up && warp_plan || echo '-')"
+    printf ' %sAuto-Update%s every %s min\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(current_interval)"
+    if routing_installed; then
+        printf ' %sRoutes%s      v4=%s  v6=%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_count "$WM_SET4")" "$(routing_count "$WM_SET6")"
+    fi
+    echo
+    printf ' %sConnectivity%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   Server direct : %s\n' "$(curl -s --connect-timeout 6 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
+    printf '   Via WARP      : %s\n' "$(warp_trace_ip)"
+    echo
+    printf ' %sLocation%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    warp_location | sed 's/^/   /'
+    echo
+    printf ' %sEnabled services%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    local any=0 id
+    while read -r id; do
+        [[ -z "$id" ]] && continue
+        printf '   • %s\n' "$(display_name "$id" 2>/dev/null || prov_field "$id" name)"; any=1
+    done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
+    [[ "$any" -eq 0 ]] && printf '   %s(none)%s\n' "$C_DIM" "$C_RESET"
+    pause
+}
+
+action_restart() {
+    banner
+    printf '\n %sRestart WARP%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    if warp_is_up; then warp_restart; else warp_up; fi
+    pause
+}
+
+menu_manage() {
+    while true; do
+        banner
+        status_line
+        printf '   %s1%s  Auto-Update IP interval\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s2%s  Change IP\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s3%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s4%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s5%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp $'\n > ' ch
+        case "$ch" in
+            1) action_interval ;;
+            2) action_change_ip ;;
+            3) menu_license ;;
+            4) action_status ;;
+            5) action_restart ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# =========================================================================
+# Uninstall — full purge
+# =========================================================================
+action_uninstall() {
+    banner
+    printf '\n %sUninstall — removes EVERYTHING%s\n\n' "$C_BOLD$C_RED" "$C_RESET"
+    printf ' %sThis deletes the WARP interface, WARP account, all rules,\n config, systemd units, and the warp-manager files.%s\n\n' "$C_GRAY" "$C_RESET"
+    read -rp " Type 'yes' to confirm: " yn
+    [[ "$yn" == "yes" ]] || { echo " Cancelled."; pause; return; }
+    purge_everything
+    printf '\n %sDone. WARP Manager has been completely removed.%s\n\n' "$C_GREEN" "$C_RESET"
+    exit 0
+}
+
+purge_everything() {
+    systemctl disable --now warp-manager-refresh.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/warp-manager-refresh.service /etc/systemd/system/warp-manager-refresh.timer
+    routing_teardown 2>/dev/null || true
+    warp_down 2>/dev/null || true
+    systemctl disable --now "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
+    rm -f "$WM_WG_CONF" /etc/sysctl.d/99-warp-manager.conf
+    rm -f /usr/local/bin/warp-manager /usr/local/bin/wm /usr/local/bin/wgcf
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    sysctl --system >/dev/null 2>&1 || true
+    rm -rf "$WM_CONF_DIR" "$WM_STATE_DIR" "$WM_ROOT"
+}
+
+# =========================================================================
+# Non-interactive subcommands (systemd / scripts)
+# =========================================================================
+case "${1:-}" in
+    --refresh)   require_root; providers_refresh; exit $? ;;
+    --up)        require_root; warp_up; providers_refresh; exit $? ;;
+    --down)      require_root; warp_down; exit $? ;;
+    --change-ip) require_root; warp_change_ip; providers_refresh; exit $? ;;
+    --location)  warp_location; exit 0 ;;
+    --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; providers_refresh; }; exit $? ;;
+    --status)    status_line; exit 0 ;;
+    --purge)     require_root; purge_everything; exit 0 ;;
+    -h|--help)
+        cat <<EOF
+WARP Manager
+  warp-manager                run the interactive menu
+  warp-manager --refresh      refresh IP sets
+  warp-manager --up           bring WARP up + apply routes
+  warp-manager --down         stop WARP
+  warp-manager --change-ip    get a new WARP IP
+  warp-manager --location     show WARP location
+  warp-manager --license KEY  apply a WARP+ license
+  warp-manager --purge        remove everything
+EOF
+        exit 0 ;;
+esac
+
+# =========================================================================
+# Main menu
+# =========================================================================
+[[ "$(id -u)" -eq 0 ]] || die "Please run as root (sudo wm)."
+ensure_dirs
+
+while true; do
+    banner
+    status_line
+    printf '   %s1%s  Choose Services\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s2%s  Custom Domains\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s3%s  Refresh Routes\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s4%s  Manage\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s5%s  Uninstall\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s6%s  Exit\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    read -rp $'\n > ' choice
+    case "$choice" in
+        1) menu_services ;;
+        2) menu_custom_domains ;;
+        3) apply_pretty ;;
+        4) menu_manage ;;
+        5) action_uninstall ;;
+        6|q|Q|0) clear 2>/dev/null || true; exit 0 ;;
+        *) ;;
+    esac
+done

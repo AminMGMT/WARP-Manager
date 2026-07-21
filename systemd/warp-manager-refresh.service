@@ -1,0 +1,8 @@
+[Unit]
+Description=WARP Manager - refresh routed IP sets (Google ranges / AI domains)
+After=network-online.target wg-quick@wgcf.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/warp-manager --refresh

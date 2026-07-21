@@ -1,0 +1,9 @@
+WARP Manager
+Copyright © 2026 Amin Mohammadi (AminMGMT)
+
+Released under the MIT License. See the LICENSE file for details.
+
+Acknowledgement
+---------------
+WARP account registration uses wgcf (https://github.com/ViRb3/wgcf), which is
+downloaded at runtime to create the WireGuard profile. Thanks to its authors.
