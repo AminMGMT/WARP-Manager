@@ -62,20 +62,31 @@ singbox_write_config() {
     local ng nd; ng=$(grep -vcE '^[[:space:]]*$' "$geosf"); nd=$(grep -vcE '^[[:space:]]*$' "$domsf")
     rm -f "$geosf" "$domsf"
 
+    # Only bind the IPv6 loopback inbound when the host actually has ::1 on lo.
+    # On IPv6-disabled hosts, binding [::1] fails with "cannot assign requested
+    # address" and takes the whole service down.
+    local have_v6=false
+    if [[ -f /proc/net/if_inet6 ]] && ip -6 addr show dev lo 2>/dev/null | grep -q '::1'; then
+        have_v6=true
+    fi
+
     jq -n \
         --argjson geos "$geos_json" \
         --argjson domains "$doms_json" \
+        --argjson has_v6 "$have_v6" \
         --arg port "$WM_SINGBOX_PORT" \
         --arg warpmark "$WM_MARK_WARP" \
         --arg dirmark "$WM_MARK_DIRECT" '
     {
       log: { level: "warn", timestamp: true },
-      inbounds: [
-        { type:"redirect", tag:"redir4", listen:"127.0.0.1", listen_port:($port|tonumber),
-          sniff:true, sniff_override_destination:false },
-        { type:"redirect", tag:"redir6", listen:"::1", listen_port:($port|tonumber),
-          sniff:true, sniff_override_destination:false }
-      ],
+      inbounds: (
+        [ { type:"redirect", tag:"redir4", listen:"127.0.0.1", listen_port:($port|tonumber),
+            sniff:true, sniff_override_destination:false } ]
+        + ( if $has_v6 then
+              [ { type:"redirect", tag:"redir6", listen:"::1", listen_port:($port|tonumber),
+                  sniff:true, sniff_override_destination:false } ]
+            else [] end )
+      ),
       outbounds: [
         { type:"direct", tag:"warp",   routing_mark:($warpmark|tonumber) },
         { type:"direct", tag:"direct", routing_mark:($dirmark|tonumber) }
