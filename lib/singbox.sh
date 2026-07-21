@@ -79,10 +79,10 @@ singbox_write_config() {
       log: { level: "warn", timestamp: true },
       inbounds: (
         [ { type:"tproxy", tag:"tproxy4", listen:"127.0.0.1", listen_port:($port|tonumber),
-            network:"tcp,udp", sniff:true, sniff_override_destination:false } ]
+            sniff:true, sniff_override_destination:false } ]
         + ( if $has_v6 then
               [ { type:"tproxy", tag:"tproxy6", listen:"::1", listen_port:($port|tonumber),
-                  network:"tcp,udp", sniff:true, sniff_override_destination:false } ]
+                  sniff:true, sniff_override_destination:false } ]
             else [] end )
       ),
       outbounds: [
