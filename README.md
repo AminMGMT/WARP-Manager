@@ -174,6 +174,15 @@ and that Gemini is selected and reachable through WARP. Read-only and safe.
   by destination IP, so it doesn't matter where DNS was resolved.
 - After a reboot, the tunnel and WARP come up automatically and the timer rebuilds the
   rules within ~45 seconds.
+- **Cloudflare rate-limit (429):** some datacenter IPs get their WARP registration
+  rate-limited. Install still completes; just wait a few minutes and do
+  **Manage → Restart**, or import an account from a server that worked:
+  ```bash
+  # on a working server:
+  cat /var/lib/warp-manager/wgcf/wgcf-account.toml
+  # on the blocked server (paste it into a file, then):
+  sudo warp-manager --import-account /path/to/wgcf-account.toml
+  ```
 
 ---
 
