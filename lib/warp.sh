@@ -111,6 +111,29 @@ warp_import_account() {
     log_info "Account imported. WARP exit: $(warp_trace_ip)"
 }
 
+# Pick a WARP peer endpoint that actually completes a handshake. The hostname
+# endpoint in the wgcf profile frequently fails on a VPS, so prefer the fixed
+# anycast IPs (like every known-good WARP script) and fall back to the hostname.
+# Override with `warp_endpoint = IP:PORT` in manager.conf if you need a specific one.
+warp_pick_endpoint() {
+    local ov; ov="$(conf_get warp_endpoint)"
+    [[ -n "$ov" ]] && { printf '%s' "$ov"; return; }
+    if ping -c1 -W1 "$WM_WARP_ENDPOINT_IP4" >/dev/null 2>&1; then
+        printf '%s:%s' "$WM_WARP_ENDPOINT_IP4" "$WM_WARP_ENDPOINT_PORT"
+    elif ping6 -c1 -W1 "$WM_WARP_ENDPOINT_IP6" >/dev/null 2>&1 \
+      || ping -6 -c1 -W1 "$WM_WARP_ENDPOINT_IP6" >/dev/null 2>&1; then
+        printf '[%s]:%s' "$WM_WARP_ENDPOINT_IP6" "$WM_WARP_ENDPOINT_PORT"
+    else
+        # ICMP may be filtered; the anycast v4 IP is still the best default on a
+        # v4 VPS. Only drop to the hostname if we have no IPv4 address at all.
+        if ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
+            printf '%s:%s' "$WM_WARP_ENDPOINT_IP4" "$WM_WARP_ENDPOINT_PORT"
+        else
+            printf '%s:%s' "$WM_WARP_ENDPOINT_HOST" "$WM_WARP_ENDPOINT_PORT"
+        fi
+    fi
+}
+
 # --- build our own wg config with non-global fwmark routing --------------
 warp_write_conf() {
     local prof="$WM_WGCF_DIR/wgcf-profile.conf"
@@ -121,7 +144,7 @@ warp_write_conf() {
     addr4="$(grep -oP '^Address\s*=\s*\K[0-9.]+/[0-9]+' "$prof" | head -n1)"
     addr6="$(grep -oP '^Address\s*=\s*\K[0-9a-fA-F:]+/[0-9]+' "$prof" | head -n1)"
     pub="$(grep -oP '^PublicKey\s*=\s*\K.*' "$prof" | head -n1)"
-    endpoint="$(grep -oP '^Endpoint\s*=\s*\K.*' "$prof" | head -n1)"
+    endpoint="$(warp_pick_endpoint)"
     [[ -n "$endpoint" ]] || endpoint="$WARP_ENDPOINT"
     [[ -n "$priv" && -n "$pub" && -n "$addr4" ]] || die "Failed to parse wgcf profile."
 
@@ -165,14 +188,13 @@ EOF
 # Make sure a WARP account is registered and the wg config exists (self-healing).
 # Returns 1 (without dying) if registration is blocked, so callers can recover.
 warp_ensure_config() {
-    if [[ ! -f "$WM_WG_CONF" ]]; then
-        log_warn "WARP config not found; setting up WARP now..."
+    if [[ ! -f "$WM_WGCF_DIR/wgcf-profile.conf" ]]; then
+        log_warn "WARP profile not found; setting up WARP now..."
         warp_register || return 1
-        warp_write_conf
-    elif [[ ! -f "$WM_WGCF_DIR/wgcf-profile.conf" ]]; then
-        warp_register || return 1
-        warp_write_conf
     fi
+    # Always regenerate the wg config from the profile so endpoint/routing fixes
+    # propagate to existing installs (the file is machine-generated; do not hand-edit).
+    warp_write_conf
     [[ -f "$WM_WG_CONF" ]]
 }
 
@@ -236,10 +258,20 @@ warp_status_short() {
 # Query the exit identity as seen *through* WARP (forces egress via the wgcf device).
 # Bounded by --max-time so a dead tunnel can never hang the caller; the result is
 # cached so the menu header can render instantly without touching the network.
+# The address curl must bind to so a probe egresses through WARP. Binding to the
+# tunnel's own source IP activates the `ip rule from <addr> lookup 51888` policy
+# route; device binding depends on a main-table route that Table=off omits, so it
+# can fail even when the tunnel is healthy. Falls back to the device name.
+_warp_bind_addr() {
+    local a; a="$(ip -4 -o addr show dev "$WM_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+    [[ -n "$a" ]] && printf '%s' "$a" || printf '%s' "$WM_IFACE"
+}
+
 warp_trace_ip() {
     warp_is_up || { echo "-"; return; }
+    local bind; bind="$(_warp_bind_addr)"
     local out
-    out="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null \
+    out="$(curl -s --interface "$bind" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null \
         | awk -F= '/^ip=/{ip=$2} /^warp=/{w=$2} END{if(ip!="")printf "%s (warp=%s)",ip,w; else print "-"}')"
     [[ -z "$out" ]] && out="-"
     # refresh the cache only on a real answer, so a transient failure keeps the last IP
@@ -257,15 +289,15 @@ warp_exit_ip_cached() {
 # Show geo/location of the WARP exit (country + Cloudflare datacenter + city).
 warp_location() {
     warp_is_up || { echo "WARP is not running."; return; }
-    local t ip loc colo
-    t="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null)"
+    local t ip loc colo bind; bind="$(_warp_bind_addr)"
+    t="$(curl -s --interface "$bind" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null)"
     ip="$(awk -F= '/^ip=/{print $2}' <<<"$t")"
     loc="$(awk -F= '/^loc=/{print $2}' <<<"$t")"
     colo="$(awk -F= '/^colo=/{print $2}' <<<"$t")"
     [[ -z "$ip" ]] && { echo "Could not reach Cloudflare through WARP."; return; }
     # bonus: city/org via ipinfo (best effort, may be unavailable)
     local city org info
-    info="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "https://ipinfo.io/${ip}/json" 2>/dev/null)"
+    info="$(curl -s --interface "$bind" --connect-timeout 4 --max-time 8 "https://ipinfo.io/${ip}/json" 2>/dev/null)"
     city="$(grep -oP '"city":\s*"\K[^"]+' <<<"$info" 2>/dev/null)"
     org="$(grep -oP '"org":\s*"\K[^"]+'  <<<"$info" 2>/dev/null)"
     printf 'IP:          %s\n' "$ip"
@@ -321,7 +353,7 @@ warp_clear_license() {
 # Report WARP account type (WARP vs WARP+) via trace warp= field.
 warp_plan() {
     warp_is_up || { echo "-"; return; }
-    local w; w="$(curl -s --interface "$WM_IFACE" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^warp=/{print $2}')"
+    local w; w="$(curl -s --interface "$(_warp_bind_addr)" --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^warp=/{print $2}')"
     case "$w" in
         plus) echo "WARP+" ;;
         on)   echo "WARP" ;;

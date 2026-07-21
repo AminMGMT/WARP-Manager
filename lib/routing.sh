@@ -20,6 +20,7 @@ table inet ${WM_NFT_TABLE} {
 
     chain nat_output {
         type nat hook output priority -100; policy accept;
+        oifname "${WM_IFACE}" return
         meta mark ${WM_MARK_WARP} return
         meta mark ${WM_MARK_DIRECT} return
         ip  daddr @${WM_XSET4} return
@@ -29,6 +30,7 @@ table inet ${WM_NFT_TABLE} {
 
     chain quic_drop {
         type filter hook output priority 0; policy accept;
+        oifname "${WM_IFACE}" return
         meta mark ${WM_MARK_WARP} return
         meta mark ${WM_MARK_DIRECT} return
         ip  daddr @${WM_XSET4} return

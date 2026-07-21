@@ -47,6 +47,12 @@ WM_EXIT_IP_CACHE="${WM_STATE_DIR}/exit-ip"
 WM_WARP_ENDPOINT_HOST="engage.cloudflareclient.com"
 # Cloudflare registration API host — must bypass the redirect so wgcf can register
 WM_WARP_API_HOST="api.cloudflareclient.com"
+# Static WARP WireGuard endpoint (anycast) — the profile's hostname endpoint often
+# never completes a handshake on a VPS, so we prefer these fixed IPs like every
+# known-good WARP script does. engage.cloudflareclient.com only as last resort.
+WM_WARP_ENDPOINT_IP4="162.159.192.1"
+WM_WARP_ENDPOINT_IP6="2606:4700:d0::a29f:c001"
+WM_WARP_ENDPOINT_PORT="2408"
 
 # nftables exclusion sets (never route these via WARP -> avoids loops)
 WM_XSET4="warpx4"
