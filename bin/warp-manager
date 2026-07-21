@@ -266,6 +266,17 @@ action_restart() {
     pause
 }
 
+action_import() {
+    banner
+    printf '\n %sImport WARP account%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    printf ' Use this if registration is rate-limited (429) on this server.\n'
+    printf ' Copy %swgcf-account.toml%s from a working server, then give its path.\n\n' "$C_WHITE" "$C_RESET"
+    read -rp " Path to wgcf-account.toml: " f
+    [[ -n "$f" ]] || { echo " Cancelled."; pause; return; }
+    if warp_import_account "$f"; then providers_refresh; fi
+    pause
+}
+
 menu_manage() {
     while true; do
         banner
@@ -275,6 +286,7 @@ menu_manage() {
         printf '   %s3%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s4%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s5%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s6%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         read -rp $'\n > ' ch
         case "$ch" in
@@ -283,6 +295,7 @@ menu_manage() {
             3) menu_license ;;
             4) action_status ;;
             5) action_restart ;;
+            6) action_import ;;
             0|"") return ;;
         esac
     done
@@ -323,6 +336,7 @@ case "${1:-}" in
     --up)        require_root; warp_up; providers_refresh; exit $? ;;
     --down)      require_root; warp_down; exit $? ;;
     --change-ip) require_root; warp_change_ip; providers_refresh; exit $? ;;
+    --import-account) require_root; warp_import_account "${2:-}" && providers_refresh; exit $? ;;
     --location)  warp_location; exit 0 ;;
     --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; providers_refresh; }; exit $? ;;
     --status)    status_line; exit 0 ;;
@@ -335,6 +349,7 @@ WARP Manager
   warp-manager --up           bring WARP up + apply routes
   warp-manager --down         stop WARP
   warp-manager --change-ip    get a new WARP IP
+  warp-manager --import-account FILE  import a wgcf-account.toml from another server
   warp-manager --location     show WARP location
   warp-manager --license KEY  apply a WARP+ license
   warp-manager --purge        remove everything
