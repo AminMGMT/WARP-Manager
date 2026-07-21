@@ -41,17 +41,18 @@ wgcf_install() {
 }
 
 # --- register a WARP account & generate a profile ------------------------
+# Returns 0 on success, 1 on failure (does NOT die, so callers can recover).
 warp_register() {
     ensure_dirs
     wgcf_install
-    cd "$WM_WGCF_DIR" || die "Could not cd into $WM_WGCF_DIR."
+    cd "$WM_WGCF_DIR" || { log_error "Could not cd into $WM_WGCF_DIR."; return 1; }
     local acct="$WM_WGCF_DIR/wgcf-account.toml"
     # drop an empty/corrupt leftover so wgcf won't refuse to overwrite it
     [[ -f "$acct" && ! -s "$acct" ]] && rm -f "$acct"
 
     if [[ ! -s "$acct" ]]; then
         log_step "Registering a WARP account..."
-        local n=0 out
+        local n=0 out wait
         while [[ ! -s "$acct" ]]; do
             out="$("$WM_WGCF_BIN" register --accept-tos </dev/null 2>&1)"
             # success = the account file now exists (ignore wgcf's exit code, which
@@ -61,10 +62,17 @@ warp_register() {
             grep -qi 'existing account' <<<"$out" && break
             n=$((n+1))
             if [[ $n -ge 5 ]]; then
-                log_error "wgcf register failed. Last output:"; printf '%s\n' "$out" >&2
-                die "WARP account registration failed after several attempts."
+                if grep -q '429' <<<"$out"; then
+                    log_error "Cloudflare rate-limited registration (429) from this server's IP."
+                    log_error "Wait a few minutes and retry, or import an account from a working server."
+                else
+                    log_error "wgcf register failed:"; printf '%s\n' "$out" >&2
+                fi
+                return 1
             fi
-            log_warn "Retrying WARP registration ($n)..."; sleep 5
+            if grep -q '429' <<<"$out"; then wait=$(( 15 * n )); [[ $wait -gt 45 ]] && wait=45; else wait=5; fi
+            log_warn "Registration attempt $n failed; retrying in ${wait}s..."
+            sleep "$wait"
         done
     fi
 
@@ -77,10 +85,30 @@ warp_register() {
         "$WM_WGCF_BIN" register --accept-tos </dev/null >/dev/null 2>&1 || true
         if ! gout="$("$WM_WGCF_BIN" generate --profile "$WM_WGCF_DIR/wgcf-profile.conf" </dev/null 2>&1)"; then
             log_error "wgcf generate failed: $gout"
-            die "Failed to generate wgcf profile."
+            return 1
         fi
     fi
     log_info "WARP account is ready."
+    return 0
+}
+
+# Import a wgcf-account.toml registered elsewhere (bypasses 429-blocked IPs).
+warp_import_account() {
+    require_root
+    local src="$1"
+    [[ -s "$src" ]] || { log_error "Account file not found: $src"; return 1; }
+    grep -qE 'private_key|access_token' "$src" || { log_error "Not a valid wgcf-account.toml: $src"; return 1; }
+    ensure_dirs; wgcf_install
+    cp -f "$src" "$WM_WGCF_DIR/wgcf-account.toml"
+    cd "$WM_WGCF_DIR" || return 1
+    if ! "$WM_WGCF_BIN" generate --profile "$WM_WGCF_DIR/wgcf-profile.conf" </dev/null >/dev/null 2>&1; then
+        log_error "Could not generate a profile from the imported account."
+        return 1
+    fi
+    local lic; lic="$(conf_get license_key)"; [[ -n "$lic" ]] && warp_apply_license "$lic"
+    warp_write_conf
+    warp_up
+    log_info "Account imported. WARP exit: $(warp_trace_ip)"
 }
 
 # --- build our own wg config with non-global fwmark routing --------------
@@ -135,21 +163,22 @@ EOF
 }
 
 # Make sure a WARP account is registered and the wg config exists (self-healing).
+# Returns 1 (without dying) if registration is blocked, so callers can recover.
 warp_ensure_config() {
     if [[ ! -f "$WM_WG_CONF" ]]; then
         log_warn "WARP config not found; setting up WARP now..."
-        warp_register
+        warp_register || return 1
         warp_write_conf
     elif [[ ! -f "$WM_WGCF_DIR/wgcf-profile.conf" ]]; then
-        warp_register
+        warp_register || return 1
         warp_write_conf
     fi
-    [[ -f "$WM_WG_CONF" ]] || die "Could not create the WARP config ($WM_WG_CONF)."
+    [[ -f "$WM_WG_CONF" ]]
 }
 
 warp_up() {
     require_root
-    warp_ensure_config
+    warp_ensure_config || { log_error "WARP is not configured (registration blocked?). Import an account or retry."; return 1; }
     _warp_sysctl
     systemctl enable "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
     if systemctl is-active --quiet "wg-quick@${WM_IFACE}"; then
@@ -236,7 +265,7 @@ warp_change_ip() {
     require_root
     log_step "Creating a new WARP account (changing IP)..."
     rm -f "$WM_WGCF_DIR/wgcf-account.toml" "$WM_WGCF_DIR/wgcf-profile.conf"
-    warp_register
+    warp_register || { log_error "Registration failed (rate-limited?). Keeping previous account if any."; return 1; }
     local lic; lic="$(conf_get license_key)"
     [[ -n "$lic" ]] && warp_apply_license "$lic"
     warp_write_conf
