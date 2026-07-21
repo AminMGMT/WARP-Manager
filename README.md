@@ -61,28 +61,31 @@ Fix: send just those sites through Cloudflare WARP, leave everything else alone.
             │  (your tunnel — untouched)
             ▼
    ┌──────────────────────────── VPS ──────────────────────────────┐
-   │  Tunnel / panel  ──►  outbound (OUTPUT) to the internet        │
+   │  Tunnel / panel  ──►  outbound 80/443                          │
    │                              │                                  │
-   │        nftables: if destination ∈ selected ranges → mark 51888  │
-   │                              │                                  │
+   │        nftables redirect (TCP 80/443)  ──►  sing-box (loopback) │
+   │                              │  reads the domain from SNI       │
    │            ┌─────────────────┴─────────────────┐                │
-   │        mark=51888                          no mark              │
+   │      selected domain                     everything else        │
    │            ▼                                    ▼                │
-   │   WARP (WireGuard)                       direct via eth0         │
+   │   WARP (mark → WireGuard)                direct via eth0         │
    │   → clean Cloudflare IP                  → normal server IP      │
    └────────────────────────────────────────────────────────────────┘
 ```
 
-- WARP comes up as a WireGuard interface in **non-global** mode: only packets
-  carrying `fwmark 51888` exit through WARP (policy routing + a dedicated table).
-- One `nftables` table (`warp`) holds two sets (v4/v6). Any packet whose destination
-  is in a set gets `fwmark 51888`. The WARP endpoint + private ranges are kept in an
-  exclusion set so a routing loop can never form.
-- The sets are filled by resolving the selected services' domains/ranges.
-- A systemd timer refreshes the sets every N minutes.
+- **sing-box** runs on loopback and reads the real **domain (SNI)** of each
+  connection, so it routes by domain — not by pre-resolved IPs. That's why **apps
+  work, not just websites**: whatever endpoint/CDN an app uses, if its domain is in
+  the selected list it goes through WARP.
+- nftables redirects only the VPS's outbound **TCP 80/443** into sing-box (SSH and
+  your tunnel's port are untouched). QUIC (UDP 443) is dropped so apps fall back to
+  TCP, which can be sniffed.
+- Selected domains leave via WARP (a WireGuard interface, reached with `fwmark
+  51888`); everything else goes direct. The WARP endpoint + private ranges are
+  excluded so a loop can't form.
 
-Because routing is decided by **destination IP at the OS level**, there is nothing to
-configure in your tunnel, and it never even notices.
+Nothing in your tunnel / Xray / panel changes — it's all done on the VPS, and no
+public port is opened (sing-box listens on localhost only).
 
 ---
 
@@ -143,7 +146,8 @@ Groups live in `data/groups.conf`; each service is a file in `data/providers/<id
 | Stream       | Netflix, Twitch, Kick                                  |
 
 Add your own: drop a `data/providers/<id>.conf` and reference it in `data/groups.conf`.
-Provider types: `domain` (a domain list), `geosite` (a category), or `cidr` (a CIDR list URL).
+Provider types: `geosite` (a sing-box rule-set category, e.g. `category=openai`) or
+`domain` (a `domains=` list). sing-box matches these by domain at runtime.
 
 ---
 
@@ -162,18 +166,18 @@ After installing, verify everything works:
 sudo bash test/e2e.sh
 ```
 
-It checks the interface, sets, policy rules, that the WARP exit IP differs from the
-server IP, that marked traffic routes via WARP while unmarked traffic stays direct,
-and that Gemini is selected and reachable through WARP. Read-only and safe.
+It checks that WARP and sing-box are running, the nftables redirect is active, the
+WARP exit IP differs from the server IP, the sing-box config is valid, and Gemini is
+reachable through WARP. Read-only and safe.
 
 ---
 
 ## Notes
 
-- Your tunnel must connect to the real destination IP (default behavior). Routing is
-  by destination IP, so it doesn't matter where DNS was resolved.
-- After a reboot, the tunnel and WARP come up automatically and the timer rebuilds the
-  rules within ~45 seconds.
+- Routing is by domain (SNI), so it works for apps and websites and doesn't depend on
+  DNS. Only TCP 80/443 is intercepted; other ports go direct.
+- After a reboot, WARP and sing-box start automatically and a boot service re-applies
+  the nftables redirect.
 - **Cloudflare rate-limit (429):** some datacenter IPs get their WARP registration
   rate-limited. Install still completes; just wait a few minutes and do
   **Manage → Restart**, or import an account from a server that worked:

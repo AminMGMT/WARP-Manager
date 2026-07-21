@@ -1,0 +1,12 @@
+[Unit]
+Description=WARP Manager - re-apply engine (WARP + sing-box + nft redirect) on boot
+After=network-online.target wg-quick@wgcf.service warp-manager-singbox.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/warp-manager --refresh
+
+[Install]
+WantedBy=multi-user.target

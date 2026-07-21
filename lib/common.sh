@@ -29,14 +29,16 @@ WM_MARK_HEX="0xcab0"                                # 51888 in hex, used by nfta
 
 # nftables objects
 WM_NFT_TABLE="warp"                                 # table inet warp
-WM_SET4="warp4"
-WM_SET6="warp6"
+
+# sing-box (SNI-based routing engine)
+WM_SINGBOX_BIN="/usr/local/bin/sing-box"
+WM_SINGBOX_CONF="${WM_CONF_DIR}/sing-box.json"
+WM_SINGBOX_PORT="47921"                             # local redirect port (loopback only)
+WM_SINGBOX_VER="1.10.7"                             # pinned; config format is 1.10.x
+WM_MARK_WARP="51888"                                # -> table 51888 -> wgcf (WARP)
+WM_MARK_DIRECT="51889"                              # sing-box direct marker (loop guard)
 
 CF_TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
-
-# systemd
-WM_TIMER_FILE="/etc/systemd/system/warp-manager-refresh.timer"
-WM_DEFAULT_REFRESH_MIN="15"
 
 # WARP endpoint host (used to build the routing-loop exclusion set)
 WM_WARP_ENDPOINT_HOST="engage.cloudflareclient.com"

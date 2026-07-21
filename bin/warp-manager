@@ -8,7 +8,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers; do
+for lib in common warp routing providers singbox; do
     src="${WM_ROOT}/lib/${lib}.sh"
     [[ -f "$src" ]] || { echo "Library not found: $src" >&2; exit 1; }
     source "$src"
@@ -36,14 +36,15 @@ EOF
     printf '      %sTeleGram : %s@BlackProtocols%s\n' "$C_GRAY" "$C_WHITE" "$C_RESET"
 }
 
-current_interval() { conf_get refresh_min "$WM_DEFAULT_REFRESH_MIN"; }
-
 status_line() {
-    local warp_state exit_ip
-    if warp_is_up; then warp_state="${C_GREEN}● running${C_RESET}"; else warp_state="${C_RED}○ stopped${C_RESET}"; fi
+    local warp_state eng_state exit_ip
+    if warp_is_up; then warp_state="${C_GREEN}● up${C_RESET}"; else warp_state="${C_RED}○ down${C_RESET}"; fi
+    if singbox_is_up; then eng_state="${C_GREEN}● on${C_RESET}"; else eng_state="${C_RED}○ off${C_RESET}"; fi
     exit_ip="$(warp_is_up && warp_trace_ip || echo '-')"
     hr
-    printf ' %sWARP%s %-18b   %sExit IP%s %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$warp_state" \
+    printf ' %sWARP%s %-16b  %sEngine%s %-16b  %sExit IP%s %s\n' \
+        "$C_PRIMARY$C_BOLD" "$C_RESET" "$warp_state" \
+        "$C_PRIMARY$C_BOLD" "$C_RESET" "$eng_state" \
         "$C_PRIMARY$C_BOLD" "$C_RESET" "${exit_ip:-–}"
     hr
 }
@@ -115,43 +116,53 @@ menu_services() {
 # =========================================================================
 # Apply — per-service Done/Failed, skip failures, load once
 # =========================================================================
+# Add any custom domains as an extra provider-like file so sing-box picks them up.
+_sync_custom_provider() {
+    local cf="$WM_PROVIDERS_DIR/_custom.conf"
+    if [[ -s "$WM_CUSTOM_FILE" ]] && grep -qvE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE"; then
+        local doms; doms="$(grep -vE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE" | tr '\n' ' ')"
+        printf 'id=_custom\nname=Custom domains\ntype=domain\ndomains=%s\n' "$doms" >"$cf"
+        provider_enable "_custom"
+    else
+        rm -f "$cf"; provider_disable "_custom"
+    fi
+}
+
+# Bring the whole engine to the desired state (WARP + sing-box + redirect).
+# Order matters: sing-box must be up BEFORE the redirect, or 80/443 would break.
+engine_apply() {
+    warp_is_up || warp_up || return 1
+    _sync_custom_provider
+    singbox_reload || return 1
+    routing_installed || routing_apply
+    routing_load_exclusions
+}
+
 apply_pretty() {
     banner
     printf '\n %sApplying%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
-    if ! warp_is_up; then printf ' %sStarting WARP...%s\n' "$C_GRAY" "$C_RESET"; warp_up || { printf ' %sWARP failed to start.%s\n' "$C_RED" "$C_RESET"; pause; return; }; fi
-    routing_installed || routing_apply_skeleton
-    routing_load_exclusions
+    if ! warp_is_up; then
+        printf ' %sStarting WARP...%s\n' "$C_GRAY" "$C_RESET"
+        warp_up || { printf ' %sWARP could not start (rate-limited?). Manage → Import Account.%s\n' "$C_RED" "$C_RESET"; pause; return; }
+    fi
 
-    local v4 v6; v4="$(mktemp)"; v6="$(mktemp)"
     local id name
     while read -r id; do
         [[ -z "$id" ]] && continue
         [[ -f "$WM_PROVIDERS_DIR/${id}.conf" ]] || continue
         name="$(display_name "$id")"; [[ -z "$name" ]] && name="$(prov_field "$id" name)"
-        printf '   %-22s ' "$name"
-        _GATHER_COUNT=0
-        _gather_provider "$id" "$v4" "$v6"
-        if [[ "${_GATHER_COUNT:-0}" -gt 0 ]]; then
-            printf '%sDone%s\n' "$C_GREEN" "$C_RESET"
-        else
-            printf '%sFailed%s\n' "$C_RED" "$C_RESET"
-        fi
+        printf '   %-22s %sON%s\n' "$name" "$C_GREEN" "$C_RESET"
     done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
 
-    # custom domains (cached; only re-resolved when the custom file changed)
-    if [[ -s "$WM_CUSTOM_FILE" ]] && grep -qvE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE"; then
-        printf '   %-22s ' "Custom domains"
-        local before after
-        before=$(( $(wc -l <"$v4") + $(wc -l <"$v6") ))
-        _gather_custom "$v4" "$v6"
-        after=$(( $(wc -l <"$v4") + $(wc -l <"$v6") ))
-        [[ "$after" -gt "$before" ]] && printf '%sDone%s\n' "$C_GREEN" "$C_RESET" || printf '%sFailed%s\n' "$C_RED" "$C_RESET"
-    fi
-
     echo
-    _providers_finalize "$v4" "$v6"
-    routing_reset_conntrack   # drop old WARP flows so disabled services go direct now
-    rm -f "$v4" "$v6" "${v4}.s" "${v6}.s"
+    _sync_custom_provider
+    if singbox_reload; then
+        routing_installed || routing_apply
+        routing_load_exclusions
+        printf ' %sApplied. Selected services route through WARP (apps + web).%s\n' "$C_GREEN" "$C_RESET"
+    else
+        printf ' %sFailed to apply — see the error above.%s\n' "$C_RED" "$C_RESET"
+    fi
     pause
 }
 
@@ -182,22 +193,6 @@ menu_custom_domains() {
 # =========================================================================
 # Manage submenu
 # =========================================================================
-action_interval() {
-    banner
-    printf '\n %sAuto-Update IP interval%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
-    printf ' %sCurrently: every %s minutes%s\n\n' "$C_GRAY" "$(current_interval)" "$C_RESET"
-    read -rp " Minutes: " m
-    [[ "$m" =~ ^[0-9]+$ && "$m" -ge 1 ]] || { [[ -n "$m" ]] && log_error "Invalid number."; pause; return; }
-    conf_set refresh_min "$m"
-    if [[ -f "$WM_TIMER_FILE" ]]; then
-        sed -i "s|^OnUnitActiveSec=.*|OnUnitActiveSec=${m}min|" "$WM_TIMER_FILE"
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl restart warp-manager-refresh.timer >/dev/null 2>&1 || true
-    fi
-    log_info "Auto-Update set to every ${m} minutes."
-    pause
-}
-
 action_change_ip() {
     banner
     printf '\n %sChange IP%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
@@ -205,7 +200,7 @@ action_change_ip() {
     read -rp $' Get a new WARP IP? [y/N]: ' yn
     [[ "$yn" =~ ^[Yy]$ ]] || { echo " Cancelled."; pause; return; }
     warp_change_ip
-    providers_refresh
+    singbox_reload
     echo; warp_location | sed 's/^/   /'
     pause
 }
@@ -225,7 +220,7 @@ menu_license() {
         read -rp " > " ch
         case "$ch" in
             s|S) read -rp " WARP+ key: " key
-                 [[ -n "$key" ]] && { warp_apply_license "$key" && { warp_write_conf; warp_up; providers_refresh; }; pause; } ;;
+                 [[ -n "$key" ]] && { warp_apply_license "$key" && { warp_write_conf; warp_up; singbox_reload; }; pause; } ;;
             c|C) warp_clear_license; pause ;;
             0|"") return ;;
         esac
@@ -237,10 +232,8 @@ action_status() {
     status_line
     echo
     printf ' %sPlan%s        %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(warp_is_up && warp_plan || echo '-')"
-    printf ' %sAuto-Update%s every %s min\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(current_interval)"
-    if routing_installed; then
-        printf ' %sRoutes%s      v4=%s  v6=%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_count "$WM_SET4")" "$(routing_count "$WM_SET6")"
-    fi
+    printf ' %sEngine%s      sing-box %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(singbox_is_up && echo 'running' || echo 'stopped')"
+    printf ' %sRedirect%s    %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_installed && echo 'active (TCP 80/443 → sing-box)' || echo 'inactive')"
     echo
     printf ' %sConnectivity%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     printf '   Server direct : %s\n' "$(curl -s --connect-timeout 6 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
@@ -261,8 +254,9 @@ action_status() {
 
 action_restart() {
     banner
-    printf '\n %sRestart WARP%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
-    if warp_is_up; then warp_restart; else warp_up; fi
+    printf '\n %sRestart engine%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    if warp_is_up; then warp_restart; fi
+    if engine_apply; then printf ' %sEngine restarted.%s\n' "$C_GREEN" "$C_RESET"; else printf ' %sSomething failed — check status.%s\n' "$C_RED" "$C_RESET"; fi
     pause
 }
 
@@ -273,7 +267,7 @@ action_import() {
     printf ' Copy %swgcf-account.toml%s from a working server, then give its path.\n\n' "$C_WHITE" "$C_RESET"
     read -rp " Path to wgcf-account.toml: " f
     [[ -n "$f" ]] || { echo " Cancelled."; pause; return; }
-    if warp_import_account "$f"; then providers_refresh; fi
+    if warp_import_account "$f"; then engine_apply; fi
     pause
 }
 
@@ -281,21 +275,19 @@ menu_manage() {
     while true; do
         banner
         status_line
-        printf '   %s1%s  Auto-Update IP interval\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s2%s  Change IP\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s3%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s4%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s5%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s6%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s1%s  Change IP\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s2%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s3%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s4%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s5%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         read -rp $'\n > ' ch
         case "$ch" in
-            1) action_interval ;;
-            2) action_change_ip ;;
-            3) menu_license ;;
-            4) action_status ;;
-            5) action_restart ;;
-            6) action_import ;;
+            1) action_change_ip ;;
+            2) menu_license ;;
+            3) action_status ;;
+            4) action_restart ;;
+            5) action_import ;;
             0|"") return ;;
         esac
     done
@@ -316,13 +308,14 @@ action_uninstall() {
 }
 
 purge_everything() {
-    systemctl disable --now warp-manager-refresh.timer >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/warp-manager-refresh.service /etc/systemd/system/warp-manager-refresh.timer
+    systemctl disable --now warp-manager-boot.service >/dev/null 2>&1 || true
+    systemctl disable --now "$WM_SINGBOX_SERVICE" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${WM_SINGBOX_SERVICE}" /etc/systemd/system/warp-manager-boot.service
     routing_teardown 2>/dev/null || true
     warp_down 2>/dev/null || true
     systemctl disable --now "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
     rm -f "$WM_WG_CONF" /etc/sysctl.d/99-warp-manager.conf
-    rm -f /usr/local/bin/warp-manager /usr/local/bin/wm /usr/local/bin/wgcf
+    rm -f /usr/local/bin/warp-manager /usr/local/bin/wm /usr/local/bin/wgcf "$WM_SINGBOX_BIN"
     systemctl daemon-reload >/dev/null 2>&1 || true
     sysctl --system >/dev/null 2>&1 || true
     rm -rf "$WM_CONF_DIR" "$WM_STATE_DIR" "$WM_ROOT"
@@ -332,22 +325,22 @@ purge_everything() {
 # Non-interactive subcommands (systemd / scripts)
 # =========================================================================
 case "${1:-}" in
-    --refresh)   require_root; providers_refresh; exit $? ;;
-    --up)        require_root; warp_up; providers_refresh; exit $? ;;
-    --down)      require_root; warp_down; exit $? ;;
-    --change-ip) require_root; warp_change_ip; providers_refresh; exit $? ;;
-    --import-account) require_root; warp_import_account "${2:-}" && providers_refresh; exit $? ;;
+    --refresh)   require_root; engine_apply; exit $? ;;
+    --up)        require_root; engine_apply; exit $? ;;
+    --down)      require_root; routing_teardown; systemctl stop "$WM_SINGBOX_SERVICE" >/dev/null 2>&1; warp_down; exit $? ;;
+    --change-ip) require_root; warp_change_ip && singbox_reload; exit $? ;;
+    --import-account) require_root; warp_import_account "${2:-}" && engine_apply; exit $? ;;
     --location)  warp_location; exit 0 ;;
-    --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; providers_refresh; }; exit $? ;;
+    --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; singbox_reload; }; exit $? ;;
     --status)    status_line; exit 0 ;;
     --purge)     require_root; purge_everything; exit 0 ;;
     -h|--help)
         cat <<EOF
 WARP Manager
   warp-manager                run the interactive menu
-  warp-manager --refresh      refresh IP sets
-  warp-manager --up           bring WARP up + apply routes
-  warp-manager --down         stop WARP
+  warp-manager --refresh      re-apply the engine (config + routes)
+  warp-manager --up           bring WARP + sing-box + redirect up
+  warp-manager --down         stop the engine (remove redirect, stop sing-box/WARP)
   warp-manager --change-ip    get a new WARP IP
   warp-manager --import-account FILE  import a wgcf-account.toml from another server
   warp-manager --location     show WARP location

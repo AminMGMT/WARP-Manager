@@ -10,7 +10,7 @@ export WM_ROOT
 
 # load libraries (functions); runtime data paths point at /opt after the copy step
 # shellcheck source=/dev/null
-for lib in common warp routing providers; do source "${SRC_DIR}/lib/${lib}.sh"; done
+for lib in common warp routing providers singbox; do source "${SRC_DIR}/lib/${lib}.sh"; done
 require_root
 
 INSTALL_LOG="/tmp/warp-manager-install.log"
@@ -70,34 +70,42 @@ step_prepare() {
     ensure_dirs
     rm -f "${WM_STATE_DIR}/.reg_failed"
     warp_register || touch "${WM_STATE_DIR}/.reg_failed"
-    return 0     # never hard-fail: a 429 shouldn't abort the whole install
+    singbox_install
+    return 0     # never hard-fail on a 429; sing-box install must succeed though
 }
 
 step_generate() {
+    # WARP interface (only if registration succeeded)
     if [[ ! -e "${WM_STATE_DIR}/.reg_failed" && -f "$WM_WGCF_DIR/wgcf-profile.conf" ]]; then
         warp_write_conf
         warp_up || true
     fi
-    routing_apply_skeleton
-    # prune stale enabled entries whose provider no longer exists (upgrades)
+    [[ -f "$WM_WGCF_DIR/wgcf-profile.conf" && -n "$(conf_get license_key)" ]] && warp_apply_license "$(conf_get license_key)"
+
+    # prune stale enabled entries; default-enable the AI group
     if [[ -s "$WM_ENABLED_FILE" ]]; then
         local kid
         while read -r kid; do [[ -f "$WM_PROVIDERS_DIR/$kid.conf" ]] && echo "$kid"; done <"$WM_ENABLED_FILE" \
             | sort -u >"${WM_ENABLED_FILE}.p"
         mv -f "${WM_ENABLED_FILE}.p" "$WM_ENABLED_FILE"
     fi
-    # default: enable the AI group so Gemini/ChatGPT work right away
     if [[ ! -s "$WM_ENABLED_FILE" ]]; then
         local id
         for id in google-ai openai grok perplexity copilot; do provider_enable "$id"; done
     fi
-    conf_set refresh_min "$WM_DEFAULT_REFRESH_MIN"
-    [[ -f "$WM_WGCF_DIR/wgcf-profile.conf" && -n "$(conf_get license_key)" ]] && warp_apply_license "$(conf_get license_key)"
-    providers_refresh || true
-    install -m 644 "${SRC_DIR}/systemd/warp-manager-refresh.service" /etc/systemd/system/warp-manager-refresh.service
-    install -m 644 "${SRC_DIR}/systemd/warp-manager-refresh.timer"   /etc/systemd/system/warp-manager-refresh.timer
+
+    # sing-box engine
+    singbox_service_setup
+    singbox_write_config
+    if warp_is_up; then
+        systemctl restart "$WM_SINGBOX_SERVICE" || true
+        sleep 1
+        singbox_is_up && routing_apply   # redirect ONLY if sing-box is actually up
+    fi
+    # re-apply the engine automatically on every boot (nft rules aren't persistent)
+    install -m 644 "${SRC_DIR}/systemd/warp-manager-boot.service" /etc/systemd/system/warp-manager-boot.service
     systemctl daemon-reload
-    systemctl enable --now warp-manager-refresh.timer >/dev/null 2>&1 || true
+    systemctl enable warp-manager-boot.service >/dev/null 2>&1 || true
 }
 
 # show the real reason then stop
@@ -119,8 +127,9 @@ progress_run "Preparing WARP"          step_prepare  || fail "WARP setup failed.
 progress_run "Generating Profile"      step_generate || fail "WARP setup failed."
 
 echo
-if warp_is_up; then
-    printf '%s  WARP is Ready%s : %ssudo wm%s\n\n' "$C_BOLD$C_GREEN" "$C_RESET" "$C_WHITE" "$C_RESET"
+if warp_is_up && singbox_is_up; then
+    printf '%s  WARP is Ready%s : %ssudo wm%s\n' "$C_BOLD$C_GREEN" "$C_RESET" "$C_WHITE" "$C_RESET"
+    printf '  %sApps and websites for the selected services now go through WARP.%s\n\n' "$C_GRAY" "$C_RESET"
 else
     printf '%s  Installed, but WARP is not connected yet.%s\n' "$C_BOLD$C_YELLOW" "$C_RESET"
     printf '  Cloudflare rate-limited registration (429) from this server, OR it needs a moment.\n\n'
