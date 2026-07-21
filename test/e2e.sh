@@ -29,16 +29,20 @@ done
 section "2) Services"
 if warp_is_up;    then ok "WARP interface (wg-quick@${WM_IFACE}) up"; else no "WARP interface down"; fi
 if singbox_is_up; then ok "sing-box engine running"; else no "sing-box not running"; fi
-if routing_installed; then ok "nftables redirect active"; else no "nftables redirect missing"; fi
+if routing_installed; then ok "nftables TPROXY active"; else no "nftables TPROXY missing"; fi
 
-section "3) Redirect rules"
-if nft list chain inet "$WM_NFT_TABLE" nat_output 2>/dev/null | grep -q "redirect to :${WM_SINGBOX_PORT}"; then
-    ok "TCP 80/443 output → sing-box:${WM_SINGBOX_PORT}"
-else no "redirect rule not found"; fi
+section "3) TPROXY rules"
+if nft list chain inet "$WM_NFT_TABLE" mangle_prerouting 2>/dev/null | grep -q "tproxy .* to .*:${WM_SINGBOX_PORT}"; then
+    ok "diverted traffic → sing-box:${WM_SINGBOX_PORT} (TCP + UDP)"
+else no "tproxy rule not found"; fi
+if ip rule show 2>/dev/null | grep -q "lookup ${WM_TPROXY_TABLE}"; then
+    ok "policy route (fwmark ${WM_TPROXY_MARK} → table ${WM_TPROXY_TABLE})"
+else no "tproxy policy route missing"; fi
 
 section "4) Exit IP: direct vs WARP"
 DIRECT_IP="$(curl -s --connect-timeout 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
-WARP_IP="$(curl -s --interface "$WM_IFACE" --connect-timeout 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
+WARP_BIND="$(ip -4 -o addr show dev "$WM_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+WARP_IP="$(curl -s --interface "${WARP_BIND:-$WM_IFACE}" --connect-timeout 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
 printf '     Server direct IP : %s%s%s\n' "$C_WHITE" "${DIRECT_IP:-?}" "$C_RESET"
 printf '     WARP exit IP     : %s%s%s\n' "$C_PRIMARY" "${WARP_IP:-?}" "$C_RESET"
 [[ -n "$WARP_IP" ]] && ok "reachable through WARP" || no "cannot reach Cloudflare via WARP"

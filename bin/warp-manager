@@ -129,8 +129,8 @@ _sync_custom_provider() {
     fi
 }
 
-# Bring the whole engine to the desired state (WARP + sing-box + redirect).
-# Order matters: sing-box must be up BEFORE the redirect, or 80/443 would break.
+# Bring the whole engine to the desired state (WARP + sing-box + TPROXY).
+# Order matters: sing-box must be up BEFORE the TPROXY rules, or 80/443 would break.
 engine_apply() {
     warp_is_up || warp_up || return 1
     _sync_custom_provider
@@ -236,7 +236,7 @@ action_status() {
     echo
     printf ' %sPlan%s        %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(warp_is_up && warp_plan || echo '-')"
     printf ' %sEngine%s      sing-box %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(singbox_is_up && echo 'running' || echo 'stopped')"
-    printf ' %sRedirect%s    %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_installed && echo 'active (TCP 80/443 → sing-box)' || echo 'inactive')"
+    printf ' %sRedirect%s    %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_installed && echo 'active (TPROXY TCP 80/443 + UDP 443 → sing-box)' || echo 'inactive')"
     echo
     printf ' %sConnectivity%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     printf '   Server direct : %s\n' "$(curl -s --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
@@ -297,6 +297,33 @@ menu_manage() {
 }
 
 # =========================================================================
+# Update — re-run the online installer (code only; config is preserved)
+# =========================================================================
+WM_UPDATE_URL="https://raw.githubusercontent.com/AminMGMT/WARP-Manager/main/setup.sh"
+
+action_update() {
+    banner
+    printf '\n %sUpdate WARP Manager%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    printf ' Pulls the latest CLI + engine and re-applies it.\n'
+    printf ' %sYour configuration is kept:%s enabled services, WARP account & exit IP,\n' "$C_GRAY" "$C_RESET"
+    printf ' WARP+ license and custom domains are all preserved.\n\n'
+    read -rp $' Update now? [y/N]: ' yn
+    [[ "$yn" =~ ^[Yy]$ ]] || { echo " Cancelled."; pause; return; }
+
+    local tmp; tmp="$(mktemp)"
+    printf '\n %sDownloading updater...%s\n' "$C_GRAY" "$C_RESET"
+    if ! curl -fsSL --connect-timeout 20 "$WM_UPDATE_URL" -o "$tmp"; then
+        rm -f "$tmp"
+        printf ' %sCould not download the updater (network/GitHub blocked?).%s\n' "$C_RED" "$C_RESET"
+        pause; return
+    fi
+    printf ' %sUpdating — the menu will reopen when it finishes.%s\n\n' "$C_GRAY" "$C_RESET"
+    # Replace this process: the installer overwrites the very script we are running,
+    # so we must NOT return into it. The installer re-opens the menu itself.
+    exec bash "$tmp"
+}
+
+# =========================================================================
 # Uninstall — full purge
 # =========================================================================
 action_uninstall() {
@@ -336,18 +363,20 @@ case "${1:-}" in
     --location)  warp_location; exit 0 ;;
     --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; singbox_reload; }; exit $? ;;
     --status)    status_line; exit 0 ;;
+    --update)    require_root; exec bash -c "$(curl -fsSL --connect-timeout 20 "$WM_UPDATE_URL")" ;;
     --purge)     require_root; purge_everything; exit 0 ;;
     -h|--help)
         cat <<EOF
 WARP Manager
   warp-manager                run the interactive menu
   warp-manager --refresh      re-apply the engine (config + routes)
-  warp-manager --up           bring WARP + sing-box + redirect up
-  warp-manager --down         stop the engine (remove redirect, stop sing-box/WARP)
+  warp-manager --up           bring WARP + sing-box + TPROXY up
+  warp-manager --down         stop the engine (remove TPROXY, stop sing-box/WARP)
   warp-manager --change-ip    get a new WARP IP
   warp-manager --import-account FILE  import a wgcf-account.toml from another server
   warp-manager --location     show WARP location
   warp-manager --license KEY  apply a WARP+ license
+  warp-manager --update       update to the latest version (keeps your config)
   warp-manager --purge        remove everything
 EOF
         exit 0 ;;
@@ -366,16 +395,18 @@ while true; do
     printf '   %s2%s  Custom Domains\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     printf '   %s3%s  Refresh Routes\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     printf '   %s4%s  Manage\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s5%s  Uninstall\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s6%s  Exit\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s5%s  Update\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s6%s  Uninstall\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s7%s  Exit\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     read -rp $'\n > ' choice
     case "$choice" in
         1) menu_services ;;
         2) menu_custom_domains ;;
         3) apply_pretty ;;
         4) menu_manage ;;
-        5) action_uninstall ;;
-        6|q|Q|0) clear 2>/dev/null || true; exit 0 ;;
+        5) action_update ;;
+        6) action_uninstall ;;
+        7|q|Q|0) clear 2>/dev/null || true; exit 0 ;;
         *) ;;
     esac
 done

@@ -2,10 +2,11 @@
 # WARP Manager - sing-box engine (SNI-based selective routing)
 # Requires common.sh (and providers.sh for prov_field/providers_list) sourced first.
 #
-# sing-box listens on loopback as a `redirect` inbound, sniffs the domain from each
-# connection, and sends the selected services out via WARP (routing_mark 51888 ->
-# table 51888 -> wgcf) while everything else goes direct. Apps work because routing
-# is decided by the real domain, not by pre-resolved IPs.
+# sing-box listens on loopback as a `tproxy` inbound (TCP + UDP), sniffs the domain
+# from each connection (TLS SNI and QUIC ClientHello), and sends the selected
+# services out via WARP (routing_mark 51888 -> table 51888 -> wgcf) while everything
+# else goes direct. Apps work because routing is decided by the real domain, not by
+# pre-resolved IPs, and because QUIC/UDP 443 is routed too (not just TCP).
 
 WM_SINGBOX_SERVICE="warp-manager-singbox.service"
 
@@ -62,29 +63,26 @@ singbox_write_config() {
     local ng nd; ng=$(grep -vcE '^[[:space:]]*$' "$geosf"); nd=$(grep -vcE '^[[:space:]]*$' "$domsf")
     rm -f "$geosf" "$domsf"
 
-    # Only bind the IPv6 loopback inbound when the host actually has ::1 on lo.
-    # On IPv6-disabled hosts, binding [::1] fails with "cannot assign requested
-    # address" and takes the whole service down.
-    local have_v6=false
-    if [[ -f /proc/net/if_inet6 ]] && ip -6 addr show dev lo 2>/dev/null | grep -q '::1'; then
-        have_v6=true
-    fi
+    # A tproxy inbound handles both TCP and UDP (QUIC), so sing-box can sniff the
+    # SNI out of QUIC ClientHello too and route apps (not just browsers) via WARP.
+    # The IPv6 inbound is only added when the host actually has ::1 (many VPS don't).
+    local has_v6=false; wm_have_v6 && has_v6=true
 
     jq -n \
         --argjson geos "$geos_json" \
         --argjson domains "$doms_json" \
-        --argjson has_v6 "$have_v6" \
+        --argjson has_v6 "$has_v6" \
         --arg port "$WM_SINGBOX_PORT" \
         --arg warpmark "$WM_MARK_WARP" \
         --arg dirmark "$WM_MARK_DIRECT" '
     {
       log: { level: "warn", timestamp: true },
       inbounds: (
-        [ { type:"redirect", tag:"redir4", listen:"127.0.0.1", listen_port:($port|tonumber),
-            sniff:true, sniff_override_destination:false } ]
+        [ { type:"tproxy", tag:"tproxy4", listen:"127.0.0.1", listen_port:($port|tonumber),
+            network:"tcp,udp", sniff:true, sniff_override_destination:false } ]
         + ( if $has_v6 then
-              [ { type:"redirect", tag:"redir6", listen:"::1", listen_port:($port|tonumber),
-                  sniff:true, sniff_override_destination:false } ]
+              [ { type:"tproxy", tag:"tproxy6", listen:"::1", listen_port:($port|tonumber),
+                  network:"tcp,udp", sniff:true, sniff_override_destination:false } ]
             else [] end )
       ),
       outbounds: [

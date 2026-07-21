@@ -33,10 +33,16 @@ WM_NFT_TABLE="warp"                                 # table inet warp
 # sing-box (SNI-based routing engine)
 WM_SINGBOX_BIN="/usr/local/bin/sing-box"
 WM_SINGBOX_CONF="${WM_CONF_DIR}/sing-box.json"
-WM_SINGBOX_PORT="47921"                             # local redirect port (loopback only)
+WM_SINGBOX_PORT="47921"                             # local tproxy port (loopback only)
 WM_SINGBOX_VER="1.10.7"                             # pinned; config format is 1.10.x
 WM_MARK_WARP="51888"                                # -> table 51888 -> wgcf (WARP)
 WM_MARK_DIRECT="51889"                              # sing-box direct marker (loop guard)
+
+# TPROXY divert: locally-generated 80/443 (TCP) + 443 (UDP/QUIC) is marked in the
+# output hook, policy-routed to loopback, and TPROXY'd into sing-box's tproxy inbound
+# so both TCP and QUIC get SNI-sniffed and sent through WARP (apps included).
+WM_TPROXY_MARK="0x1"                                # skb mark that means "divert to sing-box"
+WM_TPROXY_TABLE="100"                               # routing table with a local default via lo
 
 CF_TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 
@@ -110,6 +116,10 @@ require_root() {
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# true when the host actually has an IPv6 loopback (many VPS disable IPv6). Used to
+# decide whether to bind/route IPv6 at all, so we never fail on missing ::1.
+wm_have_v6() { [[ -f /proc/net/if_inet6 ]] && ip -6 addr show dev lo 2>/dev/null | grep -q '::1'; }
 
 # key=value config read/write in WM_CONF_FILE
 conf_get() {

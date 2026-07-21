@@ -5,6 +5,7 @@
 # WARP Manager
 
 **Selective Cloudflare WARP routing for a VPS exit node.**
+
 TeleGram: **@BlackProtocols**
 
 Only the services *you* pick (Gemini, ChatGPT, Netflix, ...) go through Cloudflare
@@ -61,10 +62,10 @@ Fix: send just those sites through Cloudflare WARP, leave everything else alone.
             │  (your tunnel — untouched)
             ▼
    ┌──────────────────────────── VPS ──────────────────────────────┐
-   │  Tunnel / panel  ──►  outbound 80/443                          │
+   │  Tunnel / panel  ──►  outbound 80/443 TCP + 443 UDP (QUIC)     │
    │                              │                                  │
-   │        nftables redirect (TCP 80/443)  ──►  sing-box (loopback) │
-   │                              │  reads the domain from SNI       │
+   │      nftables TPROXY (TCP 80/443 + UDP 443)  ──► sing-box (lo)  │
+   │                              │  reads the domain (SNI / QUIC)   │
    │            ┌─────────────────┴─────────────────┐                │
    │      selected domain                     everything else        │
    │            ▼                                    ▼                │
@@ -73,13 +74,14 @@ Fix: send just those sites through Cloudflare WARP, leave everything else alone.
    └────────────────────────────────────────────────────────────────┘
 ```
 
-- **sing-box** runs on loopback and reads the real **domain (SNI)** of each
-  connection, so it routes by domain — not by pre-resolved IPs. That's why **apps
-  work, not just websites**: whatever endpoint/CDN an app uses, if its domain is in
-  the selected list it goes through WARP.
-- nftables redirects only the VPS's outbound **TCP 80/443** into sing-box (SSH and
-  your tunnel's port are untouched). QUIC (UDP 443) is dropped so apps fall back to
-  TCP, which can be sniffed.
+- **sing-box** runs on loopback and reads the real **domain** of each connection
+  (from the TLS **SNI** *and* the **QUIC ClientHello**), so it routes by domain — not
+  by pre-resolved IPs. That's why **apps work, not just websites**: whatever
+  endpoint/CDN an app uses, if its domain is in the selected list it goes through WARP.
+- nftables TPROXYs the VPS's outbound **TCP 80/443 and UDP 443 (QUIC)** into sing-box
+  (SSH and your tunnel's inbound port are untouched — only locally-generated traffic
+  to those ports is diverted). Because QUIC is routed too (not dropped), apps that
+  speak HTTP/3 work through WARP instead of falling back or leaking.
 - Selected domains leave via WARP (a WireGuard interface, reached with `fwmark
   51888`); everything else goes direct. The WARP endpoint + private ranges are
   excluded so a loop can't form.
@@ -102,8 +104,9 @@ Menu:
  2. Custom Domains
  3. Refresh Routes
  4. Manage
- 5. Uninstall
- 6. Exit
+ 5. Update
+ 6. Uninstall
+ 7. Exit
 ```
 
 - **1) Choose Services** — toggle whole groups on/off:
@@ -116,8 +119,11 @@ Menu:
   skipped and the rest continue.
 - **2) Custom Domains** — add/remove any other domain.
 - **3) Refresh Routes** — refresh all sets now.
-- **4) Manage** — Auto-Update interval · Change IP · WARP+ License · Status · Restart.
-- **5) Uninstall** — completely removes everything.
+- **4) Manage** — Change IP · WARP+ License · Status · Restart · Import Account.
+- **5) Update** — pull the latest CLI + engine and re-apply. **Your configuration is
+  preserved** (enabled services, WARP account & exit IP, WARP+ license, custom
+  domains). Same as running the one-command installer again.
+- **6) Uninstall** — completely removes everything.
 
 ### Non-interactive commands
 
@@ -129,6 +135,7 @@ sudo warp-manager --change-ip    # get a new WARP IP
 sudo warp-manager --license KEY  # apply a WARP+ license
 warp-manager --location          # show WARP location
 warp-manager --status            # short status summary
+sudo warp-manager --update       # update to the latest version (keeps your config)
 sudo warp-manager --purge        # remove everything
 ```
 
@@ -166,18 +173,21 @@ After installing, verify everything works:
 sudo bash test/e2e.sh
 ```
 
-It checks that WARP and sing-box are running, the nftables redirect is active, the
-WARP exit IP differs from the server IP, the sing-box config is valid, and Gemini is
-reachable through WARP. Read-only and safe.
+It checks that WARP and sing-box are running, the nftables TPROXY rules are active,
+the WARP exit IP differs from the server IP, the sing-box config is valid, and Gemini
+is reachable through WARP. Read-only and safe.
 
 ---
 
 ## Notes
 
-- Routing is by domain (SNI), so it works for apps and websites and doesn't depend on
-  DNS. Only TCP 80/443 is intercepted; other ports go direct.
+- Routing is by domain (SNI / QUIC), so it works for apps and websites and doesn't
+  depend on DNS. TCP 80/443 and UDP 443 (QUIC) are intercepted; other ports go direct.
 - After a reboot, WARP and sing-box start automatically and a boot service re-applies
-  the nftables redirect.
+  the nftables TPROXY rules.
+- **Update:** menu → **Update** (option 5), or `sudo warp-manager --update`, or just
+  re-run the one-command installer. It refreshes the CLI + engine and keeps your
+  configuration untouched.
 - **Cloudflare rate-limit (429):** some datacenter IPs get their WARP registration
   rate-limited. Install still completes; just wait a few minutes and do
   **Manage → Restart**, or import an account from a server that worked:
@@ -194,7 +204,7 @@ reachable through WARP. Read-only and safe.
 
 ```bash
 sudo bash uninstall.sh
-# or from the menu: option 5
+# or from the menu: option 6
 ```
 
 Removes the WARP interface, WARP account, all rules, config, systemd units, and every

@@ -241,6 +241,9 @@ net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.default.rp_filter = 2
 net.ipv6.conf.all.forwarding = 1
 net.ipv4.ip_forward = 1
+# TPROXY delivers diverted traffic to a 127.0.0.1 socket via a local route on lo
+net.ipv4.conf.all.route_localnet = 1
+net.ipv4.conf.lo.route_localnet = 1
 EOF
     sysctl --system >/dev/null 2>&1 || true
 }
