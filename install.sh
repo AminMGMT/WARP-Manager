@@ -68,12 +68,16 @@ step_copy() {
 
 step_prepare() {
     ensure_dirs
-    warp_register
+    rm -f "${WM_STATE_DIR}/.reg_failed"
+    warp_register || touch "${WM_STATE_DIR}/.reg_failed"
+    return 0     # never hard-fail: a 429 shouldn't abort the whole install
 }
 
 step_generate() {
-    warp_write_conf
-    warp_up
+    if [[ ! -e "${WM_STATE_DIR}/.reg_failed" && -f "$WM_WGCF_DIR/wgcf-profile.conf" ]]; then
+        warp_write_conf
+        warp_up || true
+    fi
     routing_apply_skeleton
     # prune stale enabled entries whose provider no longer exists (upgrades)
     if [[ -s "$WM_ENABLED_FILE" ]]; then
@@ -88,8 +92,8 @@ step_generate() {
         for id in google-ai openai grok perplexity copilot; do provider_enable "$id"; done
     fi
     conf_set refresh_min "$WM_DEFAULT_REFRESH_MIN"
-    [[ -n "$(conf_get license_key)" ]] && warp_apply_license "$(conf_get license_key)"
-    providers_refresh
+    [[ -f "$WM_WGCF_DIR/wgcf-profile.conf" && -n "$(conf_get license_key)" ]] && warp_apply_license "$(conf_get license_key)"
+    providers_refresh || true
     install -m 644 "${SRC_DIR}/systemd/warp-manager-refresh.service" /etc/systemd/system/warp-manager-refresh.service
     install -m 644 "${SRC_DIR}/systemd/warp-manager-refresh.timer"   /etc/systemd/system/warp-manager-refresh.timer
     systemctl daemon-reload
@@ -111,10 +115,21 @@ printf '%s  WARP Manager — Installer%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
 
 progress_run "Installing Dependencies" step_deps     || fail "Dependency install failed."
 progress_run "Copying Files"           step_copy     || fail "Copy failed."
-progress_run "Preparing WARP"          step_prepare  || fail "WARP registration failed."
+progress_run "Preparing WARP"          step_prepare  || fail "WARP setup failed."
 progress_run "Generating Profile"      step_generate || fail "WARP setup failed."
 
-printf '\n%s  WARP is Ready%s : %ssudo wm%s\n\n' "$C_BOLD$C_GREEN" "$C_RESET" "$C_WHITE" "$C_RESET"
+echo
+if warp_is_up; then
+    printf '%s  WARP is Ready%s : %ssudo wm%s\n\n' "$C_BOLD$C_GREEN" "$C_RESET" "$C_WHITE" "$C_RESET"
+else
+    printf '%s  Installed, but WARP is not connected yet.%s\n' "$C_BOLD$C_YELLOW" "$C_RESET"
+    printf '  Cloudflare rate-limited registration (429) from this server, OR it needs a moment.\n\n'
+    printf '  %sFinish it one of these ways:%s\n' "$C_BOLD" "$C_RESET"
+    printf '   • wait a few minutes, then:  %ssudo wm%s → Manage → Restart\n' "$C_WHITE" "$C_RESET"
+    printf '   • or import an account from one of your working servers:\n'
+    printf '       copy  %s/var/lib/warp-manager/wgcf/wgcf-account.toml%s  from a working server, then:\n' "$C_WHITE" "$C_RESET"
+    printf '       %ssudo warp-manager --import-account /path/to/wgcf-account.toml%s\n\n' "$C_WHITE" "$C_RESET"
+fi
 sleep 1
 
 # auto-open the CLI menu
