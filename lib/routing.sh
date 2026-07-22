@@ -54,7 +54,11 @@ routing_apply() {
     _routing_iprules
     # v6 tproxy/mark lines are emitted only when the host has IPv6 (see the $( … )
     # blocks inside the ruleset), so a v4-only box stays clean.
+    # Rebuild idempotently: ensure the table exists, delete it, then recreate — so a
+    # re-apply never appends duplicate rules to the existing chains.
     nft -f - <<EOF
+table inet ${WM_NFT_TABLE} {}
+delete table inet ${WM_NFT_TABLE}
 table inet ${WM_NFT_TABLE} {
     set ${WM_XSET4} { type ipv4_addr; flags interval; auto-merge; }
     set ${WM_XSET6} { type ipv6_addr; flags interval; auto-merge; }
