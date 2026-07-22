@@ -112,7 +112,7 @@ Menu:
 - **1) Choose Services** — toggle whole groups on/off:
   - **AI** [ Gemini & Google AI, ChatGPT, Grok, Perplexity, Copilot ]
   - **Music** [ SoundCloud, Spotify, Apple Music, Tidal ]
-  - **Social Media** [ X, SnapChat, Reddit ]
+  - **Social Media** [ X, SnapChat, Reddit, TikTok ]
   - **Stream** [ Netflix, Twitch, Kick ]
 
   On apply, each service shows `Done` (green) or `Failed` (red); a failed service is
@@ -149,7 +149,7 @@ Groups live in `data/groups.conf`; each service is a file in `data/providers/<id
 |--------------|--------------------------------------------------------|
 | AI           | Gemini & Google AI, ChatGPT, Grok, Perplexity, Copilot |
 | Music        | SoundCloud, Spotify, Apple Music, Tidal                |
-| Social Media | X, SnapChat, Reddit                                    |
+| Social Media | X, SnapChat, Reddit, TikTok                            |
 | Stream       | Netflix, Twitch, Kick                                  |
 
 Add your own: drop a `data/providers/<id>.conf` and reference it in `data/groups.conf`.
