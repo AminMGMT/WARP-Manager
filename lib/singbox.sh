@@ -92,6 +92,13 @@ singbox_write_config() {
       ],
       route: {
         rules: (
+          # YouTube always stays direct, even though all of Google routes via WARP —
+          # keeps heavy video off the tunnel. Placed first so it wins over the broad
+          # google.com / googleapis.com WARP rules below (youtubei.googleapis.com is
+          # YouTube''s API, carved out explicitly).
+          [ { domain_suffix: [".youtube.com",".googlevideo.com",".ytimg.com",".ggpht.com"], outbound:"direct" },
+            { domain: ["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtubei.googleapis.com"], outbound:"direct" } ]
+          +
           # Block QUIC (UDP) of the SELECTED services first, so the app falls back to
           # TCP — which we route through WARP reliably. QUIC-over-WARP is flaky (UDP
           # through the tunnel), and a native app that sticks to QUIC would otherwise
