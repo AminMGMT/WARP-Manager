@@ -87,10 +87,20 @@ singbox_write_config() {
       ),
       outbounds: [
         { type:"direct", tag:"warp",   routing_mark:($warpmark|tonumber) },
-        { type:"direct", tag:"direct", routing_mark:($dirmark|tonumber) }
+        { type:"direct", tag:"direct", routing_mark:($dirmark|tonumber) },
+        { type:"block",  tag:"block" }
       ],
       route: {
         rules: (
+          # Block QUIC (UDP) of the SELECTED services first, so the app falls back to
+          # TCP — which we route through WARP reliably. QUIC-over-WARP is flaky (UDP
+          # through the tunnel), and a native app that sticks to QUIC would otherwise
+          # hang. Non-selected traffic keeps its QUIC (goes direct untouched).
+          ( if ($geos|length)    > 0 then [ { network:"udp", rule_set: ($geos|map("geosite-"+.)), outbound:"block" } ] else [] end )
+          +
+          ( if ($domains|length) > 0 then [ { network:"udp", domain: $domains, outbound:"block" },
+                                            { network:"udp", domain_suffix: ($domains|map("."+.)), outbound:"block" } ] else [] end )
+          +
           ( if ($geos|length)    > 0 then [ { rule_set: ($geos|map("geosite-"+.)), outbound:"warp" } ] else [] end )
           +
           ( if ($domains|length) > 0 then [ { domain: $domains, outbound:"warp" },
