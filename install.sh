@@ -102,6 +102,9 @@ step_generate() {
         sleep 1
         singbox_is_up && routing_apply   # redirect ONLY if sing-box is actually up
     fi
+    # fail-open watchdog: if the engine ever gets unhealthy, the redirect is removed
+    # automatically so the server's tunnel/panel traffic is never affected
+    watchdog_service_setup
     # re-apply the engine automatically on every boot (nft rules aren't persistent)
     install -m 644 "${SRC_DIR}/systemd/warp-manager-boot.service" /etc/systemd/system/warp-manager-boot.service
     systemctl daemon-reload

@@ -16,7 +16,9 @@ read -rp "Type 'yes' to confirm: " yn
 
 systemctl disable --now warp-manager-boot.service >/dev/null 2>&1 || true
 systemctl disable --now warp-manager-singbox.service >/dev/null 2>&1 || true
-rm -f /etc/systemd/system/warp-manager-boot.service /etc/systemd/system/warp-manager-singbox.service
+systemctl disable --now warp-manager-watchdog.timer >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/warp-manager-boot.service /etc/systemd/system/warp-manager-singbox.service \
+      /etc/systemd/system/warp-manager-watchdog.service /etc/systemd/system/warp-manager-watchdog.timer
 nft delete table inet "${WM_NFT_TABLE:-warp}" 2>/dev/null || true
 systemctl disable --now "wg-quick@${WM_IFACE:-wgcf}" >/dev/null 2>&1 || true
 rm -f "/etc/wireguard/${WM_IFACE:-wgcf}.conf" /etc/sysctl.d/99-warp-manager.conf

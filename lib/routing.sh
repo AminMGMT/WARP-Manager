@@ -122,3 +122,78 @@ routing_teardown() {
     _routing_iprules_del
     log_info "nftables TPROXY rules removed."
 }
+
+# --- fail-open watchdog ----------------------------------------------------
+# The tunnel's relay traffic must NEVER be hostage to this engine. A systemd timer
+# runs `warp-manager --watchdog` every 20s: if sing-box (or the divert path) is
+# unhealthy it removes the nft rules immediately — traffic flows direct, the tunnel
+# stays alive — and re-applies them automatically once things are healthy again.
+WM_WATCHDOG_SERVICE="warp-manager-watchdog.service"
+WM_WATCHDOG_TIMER="warp-manager-watchdog.timer"
+WM_WATCHDOG_STATE="${WM_STATE_DIR}/watchdog.down"
+
+watchdog_service_setup() {
+    require_root
+    cat >/etc/systemd/system/${WM_WATCHDOG_SERVICE} <<EOF
+[Unit]
+Description=WARP Manager - fail-open watchdog (protects the tunnel)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/warp-manager --watchdog
+EOF
+    cat >/etc/systemd/system/${WM_WATCHDOG_TIMER} <<EOF
+[Unit]
+Description=WARP Manager - fail-open watchdog timer
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=20
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "${WM_WATCHDOG_TIMER}" >/dev/null 2>&1 || true
+}
+
+# probe an HTTP(S) endpoint; while the redirect is installed this exercises the
+# full divert path (nft mark -> lo -> tproxy -> sing-box -> direct outbound)
+_watchdog_probe() {
+    curl -s --max-time 6 -o /dev/null "https://www.gstatic.com/generate_204" 2>/dev/null \
+        || curl -s --max-time 6 -o /dev/null "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null
+}
+
+watchdog_run() {
+    require_root
+    if ! singbox_is_up; then
+        if routing_installed; then
+            routing_teardown
+            date +%s >"$WM_WATCHDOG_STATE" 2>/dev/null
+            log_warn "watchdog: sing-box is down — redirect removed (fail-open, tunnel safe)."
+        fi
+        return 0
+    fi
+    if routing_installed; then
+        # two probes must BOTH fail before we fail open (avoids one-off blips)
+        if ! _watchdog_probe && ! _watchdog_probe; then
+            routing_teardown
+            date +%s >"$WM_WATCHDOG_STATE" 2>/dev/null
+            log_warn "watchdog: divert path unhealthy — redirect removed (fail-open, tunnel safe)."
+        fi
+    else
+        # Self-heal ONLY after our own fail-open (state file present) — never
+        # override an admin who removed the redirect on purpose. Wait at least
+        # 5 min after the fail-open so an unhealthy engine can't flap on/off.
+        [[ -f "$WM_WATCHDOG_STATE" ]] || return 0
+        local last now
+        last="$(cat "$WM_WATCHDOG_STATE" 2>/dev/null || echo 0)"; now="$(date +%s)"
+        if (( now - last >= 300 )) && warp_is_up && _watchdog_probe; then
+            routing_apply
+            rm -f "$WM_WATCHDOG_STATE"
+            log_info "watchdog: healthy again — redirect re-applied."
+        fi
+    fi
+    return 0
+}

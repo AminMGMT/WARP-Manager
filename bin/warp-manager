@@ -137,6 +137,8 @@ engine_apply() {
     singbox_reload || return 1
     routing_installed || routing_apply
     routing_load_exclusions
+    watchdog_service_setup                   # fail-open guard: tunnel can never die
+    rm -f "$WM_WATCHDOG_STATE" 2>/dev/null   # fresh apply clears any fail-open state
     warp_trace_ip >/dev/null 2>&1 || true   # warm the exit-IP cache for the header
 }
 
@@ -161,6 +163,8 @@ apply_pretty() {
     if singbox_reload; then
         routing_installed || routing_apply
         routing_load_exclusions
+        watchdog_service_setup
+        rm -f "$WM_WATCHDOG_STATE" 2>/dev/null
         warp_trace_ip >/dev/null 2>&1 || true   # warm the exit-IP cache for the header
         printf ' %sApplied. Selected services route through WARP (apps + web).%s\n' "$C_GREEN" "$C_RESET"
     else
@@ -340,7 +344,9 @@ action_uninstall() {
 purge_everything() {
     systemctl disable --now warp-manager-boot.service >/dev/null 2>&1 || true
     systemctl disable --now "$WM_SINGBOX_SERVICE" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/${WM_SINGBOX_SERVICE}" /etc/systemd/system/warp-manager-boot.service
+    systemctl disable --now "$WM_WATCHDOG_TIMER" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${WM_SINGBOX_SERVICE}" /etc/systemd/system/warp-manager-boot.service \
+          "/etc/systemd/system/${WM_WATCHDOG_SERVICE}" "/etc/systemd/system/${WM_WATCHDOG_TIMER}"
     routing_teardown 2>/dev/null || true
     warp_down 2>/dev/null || true
     systemctl disable --now "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
@@ -363,6 +369,7 @@ case "${1:-}" in
     --location)  warp_location; exit 0 ;;
     --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; singbox_reload; }; exit $? ;;
     --status)    status_line; exit 0 ;;
+    --watchdog)  watchdog_run; exit 0 ;;
     --update)    require_root; exec bash -c "$(curl -fsSL --connect-timeout 20 "$WM_UPDATE_URL")" ;;
     --purge)     require_root; purge_everything; exit 0 ;;
     -h|--help)
