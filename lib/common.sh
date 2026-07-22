@@ -41,8 +41,11 @@ WM_MARK_DIRECT="51889"                              # sing-box direct marker (lo
 # TPROXY divert: locally-generated 80/443 (TCP) + 443 (UDP/QUIC) is marked in the
 # output hook, policy-routed to loopback, and TPROXY'd into sing-box's tproxy inbound
 # so both TCP and QUIC get SNI-sniffed and sent through WARP (apps included).
-WM_TPROXY_MARK="0x1"                                # skb mark that means "divert to sing-box"
-WM_TPROXY_TABLE="100"                               # routing table with a local default via lo
+# NOTE: must NOT be 0x1 — that is the most common default fwmark (Xray/panels/other
+# proxies use it), and our "fwmark -> table 100 (local via lo)" rule would hijack and
+# black-hole their traffic. Use a value in our own 0xcabX namespace so it can't clash.
+WM_TPROXY_MARK="0xcab2"                             # skb mark that means "divert to sing-box"
+WM_TPROXY_TABLE="51890"                             # routing table with a local default via lo
 
 CF_TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 

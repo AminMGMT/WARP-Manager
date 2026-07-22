@@ -21,6 +21,9 @@ _routing_iprules() {
     # TPROXY to 127.0.0.1 needs local routing of the (external) dst address via lo
     sysctl -qw net.ipv4.conf.all.route_localnet=1 2>/dev/null || true
     sysctl -qw net.ipv4.conf.lo.route_localnet=1 2>/dev/null || true
+    # heal the legacy fwmark 0x1 / table 100 rule from older versions (see below)
+    while ip rule del fwmark 0x1 lookup 100 2>/dev/null; do :; done
+    while ip -6 rule del fwmark 0x1 lookup 100 2>/dev/null; do :; done
     ip rule del fwmark "$WM_TPROXY_MARK" lookup "$WM_TPROXY_TABLE" 2>/dev/null || true
     ip rule add fwmark "$WM_TPROXY_MARK" lookup "$WM_TPROXY_TABLE" 2>/dev/null || true
     ip route replace local default dev lo table "$WM_TPROXY_TABLE" 2>/dev/null || true
@@ -36,6 +39,13 @@ _routing_iprules_del() {
     ip route flush table "$WM_TPROXY_TABLE" 2>/dev/null || true
     ip -6 rule del fwmark "$WM_TPROXY_MARK" lookup "$WM_TPROXY_TABLE" 2>/dev/null || true
     ip -6 route flush table "$WM_TPROXY_TABLE" 2>/dev/null || true
+    # Legacy cleanup: earlier versions used fwmark 0x1 / table 100, which collides
+    # with the common default mark used by Xray/panels. Remove those on upgrade so a
+    # previously-broken host is fully healed.
+    while ip rule del fwmark 0x1 lookup 100 2>/dev/null; do :; done
+    while ip -6 rule del fwmark 0x1 lookup 100 2>/dev/null; do :; done
+    ip route flush table 100 2>/dev/null || true
+    ip -6 route flush table 100 2>/dev/null || true
 }
 
 routing_apply() {
