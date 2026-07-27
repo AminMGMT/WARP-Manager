@@ -52,6 +52,13 @@ CF_TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 # last-known WARP exit IP, cached so the menu header never blocks on the network
 WM_EXIT_IP_CACHE="${WM_STATE_DIR}/exit-ip"
 
+# Set while we knowingly restart the engine (e.g. an ad-list refresh). The watchdog
+# skips its checks while this exists so a planned restart is not mistaken for a
+# failure. Ignored once older than WM_MAINTENANCE_MAX_AGE, so a crashed update can
+# never leave the watchdog disabled.
+WM_MAINTENANCE_FLAG="${WM_STATE_DIR}/maintenance"
+WM_MAINTENANCE_MAX_AGE=180
+
 # WARP endpoint host (used to build the routing-loop exclusion set)
 WM_WARP_ENDPOINT_HOST="engage.cloudflareclient.com"
 # Cloudflare registration API host — must bypass the redirect so wgcf can register
@@ -123,6 +130,16 @@ has_cmd() { command -v "$1" >/dev/null 2>&1; }
 # true when the host actually has an IPv6 loopback (many VPS disable IPv6). Used to
 # decide whether to bind/route IPv6 at all, so we never fail on missing ::1.
 wm_have_v6() { [[ -f /proc/net/if_inet6 ]] && ip -6 addr show dev lo 2>/dev/null | grep -q '::1'; }
+
+# maintenance window: planned engine restarts must not look like a failure
+wm_maintenance_begin() { mkdir -p "$WM_STATE_DIR" 2>/dev/null; date +%s >"$WM_MAINTENANCE_FLAG" 2>/dev/null || true; }
+wm_maintenance_end()   { rm -f "$WM_MAINTENANCE_FLAG" 2>/dev/null || true; }
+wm_maintenance_active() {
+    [[ -s "$WM_MAINTENANCE_FLAG" ]] || return 1
+    local t now; t="$(cat "$WM_MAINTENANCE_FLAG" 2>/dev/null || echo 0)"; now="$(date +%s)"
+    if (( now - t < WM_MAINTENANCE_MAX_AGE )); then return 0; fi
+    wm_maintenance_end; return 1      # stale flag: treat as over
+}
 
 # key=value config read/write in WM_CONF_FILE
 conf_get() {

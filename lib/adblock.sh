@@ -186,6 +186,63 @@ adblock_count() {
     jq -r '[.rules[].domain // [] | length] | add // 0' "$WM_ADBLOCK_JSON" 2>/dev/null || echo 0
 }
 
+# --- refresh + scheduled updates -----------------------------------------
+# Rebuild the list and, if the blocker is on, load it into the running engine.
+# The engine is only restarted when the list actually changed, and the restart is
+# wrapped in a maintenance window so the fail-open watchdog does not read the
+# planned downtime as a fault.
+adblock_refresh() {
+    require_root
+    local before after
+    before="$(sha1sum "$WM_ADBLOCK_JSON" 2>/dev/null | cut -d' ' -f1)"
+    adblock_build || return 1
+    after="$(sha1sum "$WM_ADBLOCK_JSON" 2>/dev/null | cut -d' ' -f1)"
+
+    adblock_is_enabled || return 0
+    if [[ "$before" == "$after" ]] && singbox_is_up; then
+        log_info "Ad list unchanged; engine left running."
+        return 0
+    fi
+    singbox_reload      # already runs inside a maintenance window
+}
+
+WM_ADBLOCK_SERVICE="warp-manager-adblock.service"
+WM_ADBLOCK_TIMER="warp-manager-adblock.timer"
+
+# Weekly refresh. The randomised delay keeps a fleet of servers from fetching at
+# the same moment, and Persistent catches up a run missed while powered off.
+adblock_timer_setup() {
+    require_root
+    cat >/etc/systemd/system/${WM_ADBLOCK_SERVICE} <<EOF
+[Unit]
+Description=WARP Manager - refresh the ad blocker list
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/warp-manager --adblock-update
+EOF
+    cat >/etc/systemd/system/${WM_ADBLOCK_TIMER} <<EOF
+[Unit]
+Description=WARP Manager - weekly ad blocker list refresh
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    if adblock_is_enabled; then
+        systemctl enable --now "${WM_ADBLOCK_TIMER}" >/dev/null 2>&1 || true
+    else
+        systemctl disable --now "${WM_ADBLOCK_TIMER}" >/dev/null 2>&1 || true
+    fi
+}
+
 # Human-readable age of the list, e.g. "2h ago" / "never".
 adblock_last_update() {
     [[ -s "$WM_ADBLOCK_STAMP" ]] || { echo "never"; return; }

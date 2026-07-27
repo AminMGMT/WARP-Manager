@@ -8,7 +8,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers singbox; do
+for lib in common warp routing providers adblock singbox; do
     src="${WM_ROOT}/lib/${lib}.sh"
     [[ -f "$src" ]] || { echo "Library not found: $src" >&2; exit 1; }
     source "$src"
@@ -345,8 +345,10 @@ purge_everything() {
     systemctl disable --now warp-manager-boot.service >/dev/null 2>&1 || true
     systemctl disable --now "$WM_SINGBOX_SERVICE" >/dev/null 2>&1 || true
     systemctl disable --now "$WM_WATCHDOG_TIMER" >/dev/null 2>&1 || true
+    systemctl disable --now "$WM_ADBLOCK_TIMER" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/${WM_SINGBOX_SERVICE}" /etc/systemd/system/warp-manager-boot.service \
-          "/etc/systemd/system/${WM_WATCHDOG_SERVICE}" "/etc/systemd/system/${WM_WATCHDOG_TIMER}"
+          "/etc/systemd/system/${WM_WATCHDOG_SERVICE}" "/etc/systemd/system/${WM_WATCHDOG_TIMER}" \
+          "/etc/systemd/system/${WM_ADBLOCK_SERVICE}" "/etc/systemd/system/${WM_ADBLOCK_TIMER}"
     routing_teardown 2>/dev/null || true
     warp_down 2>/dev/null || true
     systemctl disable --now "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
@@ -370,6 +372,7 @@ case "${1:-}" in
     --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; singbox_reload; }; exit $? ;;
     --status)    status_line; exit 0 ;;
     --watchdog)  watchdog_run; exit 0 ;;
+    --adblock-update) require_root; adblock_refresh; exit $? ;;
     --update)    require_root; exec bash -c "$(curl -fsSL --connect-timeout 20 "$WM_UPDATE_URL")" ;;
     --purge)     require_root; purge_everything; exit 0 ;;
     -h|--help)
@@ -383,6 +386,7 @@ WARP Manager
   warp-manager --import-account FILE  import a wgcf-account.toml from another server
   warp-manager --location     show WARP location
   warp-manager --license KEY  apply a WARP+ license
+  warp-manager --adblock-update  refresh the ad blocker list now
   warp-manager --update       update to the latest version (keeps your config)
   warp-manager --purge        remove everything
 EOF

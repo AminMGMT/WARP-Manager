@@ -167,6 +167,8 @@ _watchdog_probe() {
 
 watchdog_run() {
     require_root
+    # A planned engine restart (ad-list refresh, re-apply) is not a fault.
+    wm_maintenance_active && return 0
     if ! singbox_is_up; then
         if routing_installed; then
             routing_teardown

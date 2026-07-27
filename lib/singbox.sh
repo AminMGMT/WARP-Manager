@@ -68,10 +68,26 @@ singbox_write_config() {
     # The IPv6 inbound is only added when the host actually has ::1 (many VPS don't).
     local has_v6=false; wm_have_v6 && has_v6=true
 
+    # Ad blocker: only wired in when it is enabled AND a built list exists, so a
+    # missing/failed download can never leave sing-box pointing at a dead rule-set.
+    local ads=false ads_path="" ads_format="" allow_json='[]'
+    if adblock_is_enabled && adblock_has_list; then
+        ads=true
+        ads_path="$(adblock_ruleset_path)"
+        ads_format="$(adblock_ruleset_format)"
+        allow_json="$(adblock_allow_domains | jq -R . | jq -s .)"
+        [[ -z "$allow_json" ]] && allow_json='[]'
+    fi
+
     jq -n \
         --argjson geos "$geos_json" \
         --argjson domains "$doms_json" \
         --argjson has_v6 "$has_v6" \
+        --argjson ads "$ads" \
+        --argjson allow "$allow_json" \
+        --arg adspath "$ads_path" \
+        --arg adsformat "$ads_format" \
+        --arg adsgeosite "$WM_ADBLOCK_GEOSITE" \
         --arg port "$WM_SINGBOX_PORT" \
         --arg warpmark "$WM_MARK_WARP" \
         --arg dirmark "$WM_MARK_DIRECT" '
@@ -103,6 +119,16 @@ singbox_write_config() {
             { domain: ["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtubei.googleapis.com",
                        "clients3.google.com","clients4.google.com"], outbound:"direct" } ]
           +
+          # Ad blocker. The allow list is matched BEFORE the block rule so a false
+          # positive can always be undone from the menu, and blocking happens before
+          # the WARP rules so ads are dropped rather than tunnelled.
+          ( if $ads and ($allow|length) > 0
+            then [ { domain: $allow, outbound:"direct" },
+                   { domain_suffix: ($allow|map("."+.)), outbound:"direct" } ]
+            else [] end )
+          +
+          ( if $ads then [ { rule_set: ["adguard-ads","geosite-"+$adsgeosite], outbound:"block" } ] else [] end )
+          +
           # Block QUIC (UDP) of the SELECTED services first, so the app falls back to
           # TCP — which we route through WARP reliably. QUIC-over-WARP is flaky (UDP
           # through the tunnel), and a native app that sticks to QUIC would otherwise
@@ -117,16 +143,28 @@ singbox_write_config() {
           ( if ($domains|length) > 0 then [ { domain: $domains, outbound:"warp" },
                                             { domain_suffix: ($domains|map("."+.)), outbound:"warp" } ] else [] end )
         ),
-        rule_set: ( $geos | map({
+        rule_set: ( ( $geos | map({
           tag:("geosite-"+.), type:"remote", format:"binary",
           url:("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-"+.+".srs"),
           download_detour:"direct", update_interval:"24h"
-        }) ),
+        }) )
+        + ( if $ads
+            then [ # locally built from the AdGuard DNS filter
+                   { tag:"adguard-ads", type:"local", format:$adsformat, path:$adspath },
+                   # second source: ready-made ads rule-set, refreshed by sing-box
+                   { tag:("geosite-"+$adsgeosite), type:"remote", format:"binary",
+                     url:("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-"+$adsgeosite+".srs"),
+                     download_detour:"direct", update_interval:"24h" } ]
+            else [] end ) ),
         final: "direct"
       }
     }' > "$WM_SINGBOX_CONF"
     chmod 644 "$WM_SINGBOX_CONF"
-    log_info "sing-box config written (${ng} rule-sets, ${nd} domains)."
+    if [[ "$ads" == true ]]; then
+        log_info "sing-box config written (${ng} rule-sets, ${nd} domains, ad blocker on: $(adblock_count) domains)."
+    else
+        log_info "sing-box config written (${ng} rule-sets, ${nd} domains)."
+    fi
 }
 
 # --- systemd service -----------------------------------------------------
@@ -156,8 +194,12 @@ singbox_reload() {
     require_root
     singbox_write_config
     if "$WM_SINGBOX_BIN" check -c "$WM_SINGBOX_CONF" >/dev/null 2>&1; then
+        # Tell the watchdog this restart is intentional, so the short gap while
+        # sing-box comes back is not treated as a failure and does not fail open.
+        wm_maintenance_begin
         systemctl restart "${WM_SINGBOX_SERVICE}"
         sleep 1
+        wm_maintenance_end
     else
         log_error "sing-box config check failed:"
         "$WM_SINGBOX_BIN" check -c "$WM_SINGBOX_CONF" 2>&1 | sed 's/^/   /' >&2
