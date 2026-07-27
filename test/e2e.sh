@@ -8,7 +8,7 @@ WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 [[ -f "${WM_ROOT}/lib/common.sh" ]] || WM_ROOT="/opt/warp-manager"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock singbox; do source "${WM_ROOT}/lib/${lib}.sh"; done
+for lib in common warp routing providers adblock ipcheck singbox; do source "${WM_ROOT}/lib/${lib}.sh"; done
 
 PASS=0; FAIL=0; SKIP=0
 ok()      { printf '  %s✔ PASS%s  %s\n' "$C_GREEN" "$C_RESET" "$1"; PASS=$((PASS+1)); }
@@ -121,6 +121,23 @@ else
 
     if systemctl is-active --quiet "$WM_ADBLOCK_TIMER"; then ok "weekly list refresh scheduled"
     else skip "refresh timer not active"; fi
+fi
+
+# ---------------------------------------------------------------------------
+section "9) Auto IP health"
+if ! ipcheck_is_enabled; then
+    skip "auto IP health disabled (Manage → Auto IP Health to enable)"
+else
+    if systemctl is-active --quiet "$WM_IPCHECK_TIMER"; then ok "health-check timer active"
+    else no "enabled but the timer is not running"; fi
+    printf '     Rotations today  : %s / %s\n' "$(_ipcheck_rotations_today)" "$(_ipcheck_max_per_day)"
+    if [[ "$(_ipcheck_rotations_today)" -lt "$(_ipcheck_max_per_day)" ]]; then ok "within the daily rotation budget"
+    else skip "daily rotation budget reached (will resume tomorrow)"; fi
+    if _ipcheck_trace; then ok "WARP exit answers (${IPCHECK_IP} / ${IPCHECK_LOC:-?})"
+    else no "no answer through WARP — the next check will rotate the IP"; fi
+    if [[ -n "${IPCHECK_LOC:-}" ]] && grep -qiw -- "${IPCHECK_LOC}" <<<"$(_ipcheck_bad_locs | tr ',' ' ')"; then
+        no "exit location ${IPCHECK_LOC} is on the bad list — it will be rotated"
+    else ok "exit location is acceptable"; fi
 fi
 
 line

@@ -115,7 +115,7 @@ Menu:
   - **Music** [ SoundCloud, Spotify, Apple Music, Tidal ]
   - **Social Media** [ X, SnapChat, Reddit, TikTok, Instagram ]
   - **Stream** [ Netflix, HBO, Twitch, Kick ]
-  - **Creative** [ Adobe, Shutterstock, PeakPX ]
+  - **Creative** [ Adobe, Shutterstock, PeakPX, Microsoft ]
 
   On apply, each service shows `Done` (green) or `Failed` (red); a failed service is
   skipped and the rest continue.
@@ -127,7 +127,8 @@ Menu:
   is just one more routing rule. The list refreshes weekly on its own. If a site ever
   breaks, add it under **Allowed domains** and it is never blocked again.
 - **4) Refresh Routes** — refresh all sets now.
-- **5) Manage** — Change IP · WARP+ License · Status · Restart · Import Account.
+- **5) Manage** — Change IP · **Auto IP Health** · WARP+ License · Status · Restart ·
+  Import Account.
 - **6) Update** — pull the latest CLI + engine and re-apply. **Your configuration is
   preserved** (enabled services, WARP account & exit IP, WARP+ license, custom
   domains). Same as running the one-command installer again.
@@ -142,6 +143,7 @@ sudo warp-manager --down         # stop WARP
 sudo warp-manager --change-ip    # get a new WARP IP
 sudo warp-manager --license KEY  # apply a WARP+ license
 sudo warp-manager --adblock-update # refresh the ad blocker list
+sudo warp-manager --ip-check     # check the WARP exit IP now (rotates it if bad)
 warp-manager --location          # show WARP location
 warp-manager --status            # short status summary
 sudo warp-manager --update       # update to the latest version (keeps your config)
@@ -160,7 +162,7 @@ Groups live in `data/groups.conf`; each service is a file in `data/providers/<id
 | Music        | SoundCloud, Spotify, Apple Music, Tidal                |
 | Social Media | X, SnapChat, Reddit, TikTok, Instagram                 |
 | Stream       | Netflix, HBO, Twitch, Kick                             |
-| Creative     | Adobe, Shutterstock, PeakPX                            |
+| Creative     | Adobe, Shutterstock, PeakPX, Microsoft                 |
 
 Add your own: drop a `data/providers/<id>.conf` and reference it in `data/groups.conf`.
 Provider types: `geosite` (a sing-box rule-set category, e.g. `category=openai`) or
@@ -200,6 +202,13 @@ actually blocked while normal sites are not. Read-only and safe.
 - **Ad blocker:** the block list lives in `/var/lib/warp-manager/adblock/` and never
   replaces a working list with a failed download. A weekly timer refreshes it, and the
   engine is only restarted when the list actually changed.
+- **Auto IP health** (Manage → Auto IP Health, off by default): every 10 minutes the
+  exit is probed through WARP. A new IP is requested only when the tunnel is up, the
+  server's own internet works, and the exit is genuinely dead or in a blocked region
+  (`IR` by default). Rotations are capped — at least 30 min apart and 4 per day — so a
+  transient outage can never burn through Cloudflare's registration limits and get the
+  server 429'd. Tunables in `/etc/warp-manager/manager.conf`: `ipcheck_bad_locs`,
+  `ipcheck_min_interval`, `ipcheck_max_per_day`.
 - **Tunnel safety:** a fail-open watchdog checks the engine every 20s. If sing-box or
   the divert path is ever unhealthy it removes the nftables rules automatically, so
   traffic falls back to direct and the server's tunnel keeps working; it re-applies

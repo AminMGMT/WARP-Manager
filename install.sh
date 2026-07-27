@@ -10,7 +10,7 @@ export WM_ROOT
 
 # load libraries (functions); runtime data paths point at /opt after the copy step
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock singbox; do source "${SRC_DIR}/lib/${lib}.sh"; done
+for lib in common warp routing providers adblock ipcheck singbox; do source "${SRC_DIR}/lib/${lib}.sh"; done
 require_root
 
 INSTALL_LOG="/tmp/warp-manager-install.log"
@@ -107,6 +107,8 @@ step_generate() {
     watchdog_service_setup
     # ad blocker units are installed but the timer only runs while it is enabled
     adblock_timer_setup
+    # exit-IP health check units; the timer likewise only runs when enabled
+    ipcheck_timer_setup
     # re-apply the engine automatically on every boot (nft rules aren't persistent)
     install -m 644 "${SRC_DIR}/systemd/warp-manager-boot.service" /etc/systemd/system/warp-manager-boot.service
     systemctl daemon-reload

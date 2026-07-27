@@ -8,7 +8,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock singbox; do
+for lib in common warp routing providers adblock ipcheck singbox; do
     src="${WM_ROOT}/lib/${lib}.sh"
     [[ -f "$src" ]] || { echo "Library not found: $src" >&2; exit 1; }
     source "$src"
@@ -138,6 +138,7 @@ engine_apply() {
     routing_installed || routing_apply
     routing_load_exclusions
     watchdog_service_setup                   # fail-open guard: tunnel can never die
+    ipcheck_timer_setup                      # auto exit-IP health check (if enabled)
     rm -f "$WM_WATCHDOG_STATE" 2>/dev/null   # fresh apply clears any fail-open state
     warp_trace_ip >/dev/null 2>&1 || true   # warm the exit-IP cache for the header
 }
@@ -313,6 +314,42 @@ action_change_ip() {
     pause
 }
 
+menu_ipcheck() {
+    while true; do
+        banner
+        printf '\n %sAuto IP Health%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf ' Checks in the background that the WARP exit IP actually works,\n'
+        printf ' and gets a new one automatically when it does not.\n\n'
+        if ipcheck_is_enabled; then
+            printf '   Status    %s● on%s\n' "$C_GREEN" "$C_RESET"
+        else
+            printf '   Status    %s○ off%s\n' "$C_GRAY" "$C_RESET"
+        fi
+        printf '   Checks    every 10 minutes\n'
+        printf '   Rotations %s used today (max %s)\n' "$(_ipcheck_rotations_today)" "$(_ipcheck_max_per_day)"
+        printf '   Bad locs  %s\n' "$(_ipcheck_bad_locs)"
+        printf '\n %sA new IP is only requested when the tunnel is up, the server''s own\n' "$C_GRAY"
+        printf ' internet works, and the exit is really dead or in a blocked region —\n'
+        printf ' so a brief outage can never burn through Cloudflare''s limits.%s\n' "$C_RESET"
+        printf '\n   %st%s  Turn %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(ipcheck_is_enabled && echo off || echo on)"
+        printf '   %sc%s  Check now\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            t|T) if ipcheck_is_enabled; then ipcheck_disable; else ipcheck_enable; fi
+                 ipcheck_timer_setup
+                 printf '\n %sAuto IP health is %s.%s\n' "$C_GREEN" "$(ipcheck_is_enabled && echo on || echo off)" "$C_RESET"
+                 pause ;;
+            c|C) printf '\n %sChecking the WARP exit...%s\n' "$C_GRAY" "$C_RESET"
+                 if ipcheck_is_enabled; then ipcheck_run
+                 else printf ' %sTurn it on first (or use Change IP for a one-off).%s\n' "$C_YELLOW" "$C_RESET"; fi
+                 printf ' Exit IP: %s\n' "$(warp_trace_ip)"
+                 pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 menu_license() {
     while true; do
         banner
@@ -389,18 +426,21 @@ menu_manage() {
         banner
         status_line
         printf '   %s1%s  Change IP\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s2%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s3%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s4%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s5%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s2%s  Auto IP Health  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+            "$(ipcheck_is_enabled && printf '%s● on%s' "$C_GREEN" "$C_RESET" || printf '%s○ off%s' "$C_GRAY" "$C_RESET")"
+        printf '   %s3%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s4%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s5%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s6%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         read -rp $'\n > ' ch
         case "$ch" in
             1) action_change_ip ;;
-            2) menu_license ;;
-            3) action_status ;;
-            4) action_restart ;;
-            5) action_import ;;
+            2) menu_ipcheck ;;
+            3) menu_license ;;
+            4) action_status ;;
+            5) action_restart ;;
+            6) action_import ;;
             0|"") return ;;
         esac
     done
@@ -452,9 +492,11 @@ purge_everything() {
     systemctl disable --now "$WM_SINGBOX_SERVICE" >/dev/null 2>&1 || true
     systemctl disable --now "$WM_WATCHDOG_TIMER" >/dev/null 2>&1 || true
     systemctl disable --now "$WM_ADBLOCK_TIMER" >/dev/null 2>&1 || true
+    systemctl disable --now "$WM_IPCHECK_TIMER" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/${WM_SINGBOX_SERVICE}" /etc/systemd/system/warp-manager-boot.service \
           "/etc/systemd/system/${WM_WATCHDOG_SERVICE}" "/etc/systemd/system/${WM_WATCHDOG_TIMER}" \
-          "/etc/systemd/system/${WM_ADBLOCK_SERVICE}" "/etc/systemd/system/${WM_ADBLOCK_TIMER}"
+          "/etc/systemd/system/${WM_ADBLOCK_SERVICE}" "/etc/systemd/system/${WM_ADBLOCK_TIMER}" \
+          "/etc/systemd/system/${WM_IPCHECK_SERVICE}" "/etc/systemd/system/${WM_IPCHECK_TIMER}"
     routing_teardown 2>/dev/null || true
     warp_down 2>/dev/null || true
     systemctl disable --now "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
@@ -479,6 +521,7 @@ case "${1:-}" in
     --status)    status_line; exit 0 ;;
     --watchdog)  watchdog_run; exit 0 ;;
     --adblock-update) require_root; adblock_refresh; exit $? ;;
+    --ip-check)  require_root; ipcheck_run; exit 0 ;;
     --update)    require_root; exec bash -c "$(curl -fsSL --connect-timeout 20 "$WM_UPDATE_URL")" ;;
     --purge)     require_root; purge_everything; exit 0 ;;
     -h|--help)
@@ -493,6 +536,7 @@ WARP Manager
   warp-manager --location     show WARP location
   warp-manager --license KEY  apply a WARP+ license
   warp-manager --adblock-update  refresh the ad blocker list now
+  warp-manager --ip-check     check the WARP exit IP now (rotates it if bad)
   warp-manager --update       update to the latest version (keeps your config)
   warp-manager --purge        remove everything
 EOF
