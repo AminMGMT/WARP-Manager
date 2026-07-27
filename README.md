@@ -113,9 +113,9 @@ Menu:
 - **1) Choose Services** — toggle whole groups on/off:
   - **AI** [ Gemini & Google AI, ChatGPT, Grok, Perplexity, Copilot ]
   - **Music** [ SoundCloud, Spotify, Apple Music, Tidal ]
-  - **Social Media** [ X, SnapChat, Reddit, TikTok ]
+  - **Social Media** [ X, SnapChat, Reddit, TikTok, Instagram ]
   - **Stream** [ Netflix, HBO, Twitch, Kick ]
-  - **Creative** [ Adobe, Shutterstock ]
+  - **Creative** [ Adobe, Shutterstock, PeakPX ]
 
   On apply, each service shows `Done` (green) or `Failed` (red); a failed service is
   skipped and the rest continue.
@@ -158,9 +158,9 @@ Groups live in `data/groups.conf`; each service is a file in `data/providers/<id
 |--------------|--------------------------------------------------------|
 | AI           | Gemini & Google AI, ChatGPT, Grok, Perplexity, Copilot |
 | Music        | SoundCloud, Spotify, Apple Music, Tidal                |
-| Social Media | X, SnapChat, Reddit, TikTok                            |
+| Social Media | X, SnapChat, Reddit, TikTok, Instagram                 |
 | Stream       | Netflix, HBO, Twitch, Kick                             |
-| Creative     | Adobe, Shutterstock                                    |
+| Creative     | Adobe, Shutterstock, PeakPX                            |
 
 Add your own: drop a `data/providers/<id>.conf` and reference it in `data/groups.conf`.
 Provider types: `geosite` (a sing-box rule-set category, e.g. `category=openai`) or
