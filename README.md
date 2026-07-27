@@ -102,11 +102,12 @@ Menu:
 ```
  1. Choose Services
  2. Custom Domains
- 3. Refresh Routes
- 4. Manage
- 5. Update
- 6. Uninstall
- 7. Exit
+ 3. Ad Blocker
+ 4. Refresh Routes
+ 5. Manage
+ 6. Update
+ 7. Uninstall
+ 8. Exit
 ```
 
 - **1) Choose Services** — toggle whole groups on/off:
@@ -119,12 +120,18 @@ Menu:
   On apply, each service shows `Done` (green) or `Failed` (red); a failed service is
   skipped and the rest continue.
 - **2) Custom Domains** — add/remove any other domain.
-- **3) Refresh Routes** — refresh all sets now.
-- **4) Manage** — Change IP · WARP+ License · Status · Restart · Import Account.
-- **5) Update** — pull the latest CLI + engine and re-apply. **Your configuration is
+- **3) Ad Blocker** — block ads and trackers for everyone using the server, using the
+  **AdGuard DNS filter** (~160k domains) plus sing-box's own ads rule-set. Off by
+  default; turn it on and the list is downloaded and applied. No extra service, no
+  DNS server, no web UI — the engine already knows each connection's domain, so this
+  is just one more routing rule. The list refreshes weekly on its own. If a site ever
+  breaks, add it under **Allowed domains** and it is never blocked again.
+- **4) Refresh Routes** — refresh all sets now.
+- **5) Manage** — Change IP · WARP+ License · Status · Restart · Import Account.
+- **6) Update** — pull the latest CLI + engine and re-apply. **Your configuration is
   preserved** (enabled services, WARP account & exit IP, WARP+ license, custom
   domains). Same as running the one-command installer again.
-- **6) Uninstall** — completely removes everything.
+- **7) Uninstall** — completely removes everything.
 
 ### Non-interactive commands
 
@@ -134,6 +141,7 @@ sudo warp-manager --up           # bring WARP up + apply routes
 sudo warp-manager --down         # stop WARP
 sudo warp-manager --change-ip    # get a new WARP IP
 sudo warp-manager --license KEY  # apply a WARP+ license
+sudo warp-manager --adblock-update # refresh the ad blocker list
 warp-manager --location          # show WARP location
 warp-manager --status            # short status summary
 sudo warp-manager --update       # update to the latest version (keeps your config)
@@ -177,7 +185,9 @@ sudo bash test/e2e.sh
 
 It checks that WARP and sing-box are running, the nftables TPROXY rules are active,
 the WARP exit IP differs from the server IP, the sing-box config is valid, and Gemini
-is reachable through WARP. Read-only and safe.
+is reachable through WARP. It also verifies the tunnel-safety guards (fail-open
+watchdog, client connectivity check) and, when the ad blocker is on, that ads are
+actually blocked while normal sites are not. Read-only and safe.
 
 ---
 
@@ -187,7 +197,14 @@ is reachable through WARP. Read-only and safe.
   depend on DNS. TCP 80/443 and UDP 443 (QUIC) are intercepted; other ports go direct.
 - After a reboot, WARP and sing-box start automatically and a boot service re-applies
   the nftables TPROXY rules.
-- **Update:** menu → **Update** (option 5), or `sudo warp-manager --update`, or just
+- **Ad blocker:** the block list lives in `/var/lib/warp-manager/adblock/` and never
+  replaces a working list with a failed download. A weekly timer refreshes it, and the
+  engine is only restarted when the list actually changed.
+- **Tunnel safety:** a fail-open watchdog checks the engine every 20s. If sing-box or
+  the divert path is ever unhealthy it removes the nftables rules automatically, so
+  traffic falls back to direct and the server's tunnel keeps working; it re-applies
+  them once things are healthy again.
+- **Update:** menu → **Update** (option 6), or `sudo warp-manager --update`, or just
   re-run the one-command installer. It refreshes the CLI + engine and keeps your
   configuration untouched.
 - **Cloudflare rate-limit (429):** some datacenter IPs get their WARP registration
@@ -206,7 +223,7 @@ is reachable through WARP. Read-only and safe.
 
 ```bash
 sudo bash uninstall.sh
-# or from the menu: option 6
+# or from the menu: option 7
 ```
 
 Removes the WARP interface, WARP account, all rules, config, systemd units, and every

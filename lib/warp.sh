@@ -282,10 +282,26 @@ warp_trace_ip() {
     printf '%s\n' "$out"
 }
 
+# Refresh the cached exit IP without blocking the caller. Fully detached so the
+# menu never waits on it and no job-control noise reaches the terminal.
+warp_cache_refresh_bg() {
+    warp_is_up || return 0
+    ( warp_trace_ip >/dev/null 2>&1 & ) >/dev/null 2>&1
+}
+
+# True when the cache is missing or older than the TTL.
+_warp_cache_stale() {
+    [[ -s "$WM_EXIT_IP_CACHE" ]] || return 0
+    local age; age=$(( $(date +%s) - $(stat -c %Y "$WM_EXIT_IP_CACHE" 2>/dev/null || echo 0) ))
+    (( age > WM_EXIT_IP_TTL ))
+}
+
 # Instant, non-blocking exit IP for the menu header: reads the cached value only.
-# Never touches the network, so redrawing a menu is always fast.
+# Never touches the network itself; when the value is missing or stale it kicks off
+# a background refresh so the next redraw shows the real IP.
 warp_exit_ip_cached() {
     warp_is_up || { echo "-"; return; }
+    _warp_cache_stale && warp_cache_refresh_bg
     if [[ -s "$WM_EXIT_IP_CACHE" ]]; then cat "$WM_EXIT_IP_CACHE"; else echo "-"; fi
 }
 

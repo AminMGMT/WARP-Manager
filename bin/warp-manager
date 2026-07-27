@@ -198,6 +198,107 @@ menu_custom_domains() {
 }
 
 # =========================================================================
+# Ad Blocker
+# =========================================================================
+menu_whitelist() {
+    while true; do
+        banner
+        printf '\n %sAd Blocker — Allowed Domains%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf ' %sDomains here are never blocked. Add one if a site breaks.%s\n\n' "$C_GRAY" "$C_RESET"
+        if [[ -s "$WM_ADBLOCK_WHITELIST" ]] && grep -qvE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST"; then
+            grep -nvE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST" | sed 's/^/   /'
+        else
+            printf '   %s(none — built-in safe domains are always protected)%s\n' "$C_DIM" "$C_RESET"
+        fi
+        printf '\n %s+%s add   %s-%s remove   %s0%s back\n\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            0|"") return ;;
+            +) read -rp " Domain to allow: " d
+               [[ -n "$d" ]] && { adblock_whitelist_add "$d"; WM_ADBLOCK_DIRTY=1; } ;;
+            -) read -rp " Domain to remove: " d
+               [[ -n "$d" ]] && { adblock_whitelist_remove "$d"; WM_ADBLOCK_DIRTY=1; } ;;
+        esac
+    done
+}
+
+menu_adblock() {
+    WM_ADBLOCK_DIRTY=0
+    while true; do
+        banner
+        printf '\n %sAd Blocker%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        if adblock_is_enabled; then
+            printf '   Status    %s● on%s\n' "$C_GREEN" "$C_RESET"
+        else
+            printf '   Status    %s○ off%s\n' "$C_GRAY" "$C_RESET"
+        fi
+        if adblock_has_list; then
+            printf '   Blocked   %s%s%s domains\n' "$C_WHITE" "$(adblock_count)" "$C_RESET"
+            printf '   Updated   %s\n' "$(adblock_last_update)"
+        else
+            printf '   List      %s(not downloaded yet)%s\n' "$C_DIM" "$C_RESET"
+        fi
+        printf '\n %sBlocks ads and trackers for everyone using this server,%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %susing the AdGuard DNS filter. No extra service runs.%s\n' "$C_GRAY" "$C_RESET"
+        printf '\n   %st%s  Turn %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(adblock_is_enabled && echo off || echo on)"
+        printf '   %su%s  Update list now\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %sw%s  Allowed domains (fix a blocked site)\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            t|T)
+                if adblock_is_enabled; then
+                    adblock_disable
+                    systemctl disable --now "$WM_ADBLOCK_TIMER" >/dev/null 2>&1 || true
+                    printf '\n %sTurning off...%s\n' "$C_GRAY" "$C_RESET"
+                    singbox_reload >/dev/null 2>&1 && printf ' %sAd blocker is off.%s\n' "$C_GREEN" "$C_RESET" \
+                        || printf ' %sCould not reload the engine.%s\n' "$C_RED" "$C_RESET"
+                else
+                    adblock_enable
+                    # first run has no list yet: fetch it before touching the engine
+                    if ! adblock_has_list; then
+                        printf '\n %sDownloading the ad list (this takes a moment)...%s\n' "$C_GRAY" "$C_RESET"
+                        if ! adblock_build; then
+                            adblock_disable
+                            printf ' %sCould not build the list — ad blocker stays off.%s\n' "$C_RED" "$C_RESET"
+                            pause; continue
+                        fi
+                    fi
+                    adblock_timer_setup
+                    printf '\n %sEnabling...%s\n' "$C_GRAY" "$C_RESET"
+                    if singbox_reload >/dev/null 2>&1; then
+                        printf ' %sAd blocker is on (%s domains).%s\n' "$C_GREEN" "$(adblock_count)" "$C_RESET"
+                    else
+                        adblock_disable
+                        printf ' %sEngine rejected the config — ad blocker turned back off.%s\n' "$C_RED" "$C_RESET"
+                        singbox_reload >/dev/null 2>&1
+                    fi
+                fi
+                WM_ADBLOCK_DIRTY=0
+                pause ;;
+            u|U)
+                printf '\n %sRefreshing the ad list...%s\n' "$C_GRAY" "$C_RESET"
+                if adblock_refresh; then printf ' %sUpdated: %s domains.%s\n' "$C_GREEN" "$(adblock_count)" "$C_RESET"
+                else printf ' %sUpdate failed — the previous list is still in use.%s\n' "$C_RED" "$C_RESET"; fi
+                WM_ADBLOCK_DIRTY=0
+                pause ;;
+            w|W) menu_whitelist ;;
+            0|"")
+                # a changed allow list only takes effect after a rebuild + reload
+                if [[ "${WM_ADBLOCK_DIRTY:-0}" -eq 1 ]] && adblock_is_enabled; then
+                    printf '\n %sApplying the allowed-domain changes...%s\n' "$C_GRAY" "$C_RESET"
+                    adblock_refresh >/dev/null 2>&1 \
+                        && printf ' %sApplied.%s\n' "$C_GREEN" "$C_RESET" \
+                        || printf ' %sCould not apply — try Update list.%s\n' "$C_RED" "$C_RESET"
+                    sleep 1
+                fi
+                return ;;
+        esac
+    done
+}
+
+# =========================================================================
 # Manage submenu
 # =========================================================================
 action_change_ip() {
@@ -241,6 +342,11 @@ action_status() {
     printf ' %sPlan%s        %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(warp_is_up && warp_plan || echo '-')"
     printf ' %sEngine%s      sing-box %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(singbox_is_up && echo 'running' || echo 'stopped')"
     printf ' %sRedirect%s    %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_installed && echo 'active (TPROXY TCP 80/443 + UDP 443 → sing-box)' || echo 'inactive')"
+    if adblock_is_enabled; then
+        printf ' %sAd Blocker%s  on — %s domains (updated %s)\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(adblock_count)" "$(adblock_last_update)"
+    else
+        printf ' %sAd Blocker%s  off\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    fi
     echo
     printf ' %sConnectivity%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     printf '   Server direct : %s\n' "$(curl -s --connect-timeout 4 --max-time 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"
@@ -404,20 +510,23 @@ while true; do
     status_line
     printf '   %s1%s  Choose Services\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     printf '   %s2%s  Custom Domains\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s3%s  Refresh Routes\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s4%s  Manage\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s5%s  Update\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s6%s  Uninstall\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s7%s  Exit\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s3%s  Ad Blocker %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+        "$(adblock_is_enabled && printf '%s● on%s' "$C_GREEN" "$C_RESET" || printf '%s○ off%s' "$C_GRAY" "$C_RESET")"
+    printf '   %s4%s  Refresh Routes\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s5%s  Manage\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s6%s  Update\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s7%s  Uninstall\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s8%s  Exit\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     read -rp $'\n > ' choice
     case "$choice" in
         1) menu_services ;;
         2) menu_custom_domains ;;
-        3) apply_pretty ;;
-        4) menu_manage ;;
-        5) action_update ;;
-        6) action_uninstall ;;
-        7|q|Q|0) clear 2>/dev/null || true; exit 0 ;;
+        3) menu_adblock ;;
+        4) apply_pretty ;;
+        5) menu_manage ;;
+        6) action_update ;;
+        7) action_uninstall ;;
+        8|q|Q|0) clear 2>/dev/null || true; exit 0 ;;
         *) ;;
     esac
 done

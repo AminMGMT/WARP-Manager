@@ -169,6 +169,9 @@ watchdog_run() {
     require_root
     # A planned engine restart (ad-list refresh, re-apply) is not a fault.
     wm_maintenance_active && return 0
+    # Keep the menu's exit-IP cache warm; this runs every 20s anyway, so the header
+    # is correct shortly after WARP comes up without anyone opening the menu.
+    _warp_cache_stale && warp_cache_refresh_bg
     if ! singbox_is_up; then
         if routing_installed; then
             routing_teardown

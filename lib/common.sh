@@ -49,8 +49,12 @@ WM_TPROXY_TABLE="51890"                             # routing table with a local
 
 CF_TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 
-# last-known WARP exit IP, cached so the menu header never blocks on the network
+# last-known WARP exit IP, cached so the menu header never blocks on the network.
+# Older than the TTL, it is refreshed in the background: the header stays instant
+# but still catches up on its own after WARP comes up (e.g. at boot), instead of
+# staying blank until the user restarts the engine by hand.
 WM_EXIT_IP_CACHE="${WM_STATE_DIR}/exit-ip"
+WM_EXIT_IP_TTL=120
 
 # Set while we knowingly restart the engine (e.g. an ad-list refresh). The watchdog
 # skips its checks while this exists so a planned restart is not mistaken for a
