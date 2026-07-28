@@ -60,8 +60,16 @@ routing_apply() {
 table inet ${WM_NFT_TABLE} {}
 delete table inet ${WM_NFT_TABLE}
 table inet ${WM_NFT_TABLE} {
-    set ${WM_XSET4} { type ipv4_addr; flags interval; auto-merge; }
-    set ${WM_XSET6} { type ipv6_addr; flags interval; auto-merge; }
+    # The reserved/private ranges are declared inline so they are excluded from the
+    # instant the table exists. routing_load_exclusions re-adds them together with
+    # the resolved WARP endpoint IPs; if that ever fails, local traffic is still safe.
+    set ${WM_XSET4} { type ipv4_addr; flags interval; auto-merge;
+        elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8,
+                     169.254.0.0/16, 100.64.0.0/10,
+                     162.159.192.0/24, 162.159.193.0/24, 162.159.195.0/24 } }
+    set ${WM_XSET6} { type ipv6_addr; flags interval; auto-merge;
+        elements = { ::1/128, fc00::/7, fe80::/10,
+                     2606:4700:d0::/48, 2606:4700:d1::/48 } }
 
     # Diverted (output-marked) packets loop back to lo and land here; TPROXY hands
     # them to sing-box. Gated on our mark so inbound traffic (SSH, the proxy's own
@@ -77,6 +85,11 @@ $( wm_have_v6 && printf '        meta mark %s meta nfproto ipv6 meta l4proto tcp
     # 'type route' forces a re-route when the mark changes.
     chain mangle_output {
         type route hook output priority mangle; policy accept;
+        # Anything already routed out through WARP is left alone. Without this,
+        # probes bound to the tunnel (warp_trace_ip, the IP health check) would be
+        # diverted into sing-box and silently sent out direct instead — reporting
+        # the wrong exit IP and making the health check judge the wrong path.
+        oifname "${WM_IFACE}" return
         meta mark ${WM_MARK_HEX} return
         meta mark 0xcab1 return
         ip  daddr @${WM_XSET4} return
