@@ -209,6 +209,13 @@ actually blocked while normal sites are not. Read-only and safe.
   transient outage can never burn through Cloudflare's registration limits and get the
   server 429'd. Tunables in `/etc/warp-manager/manager.conf`: `ipcheck_bad_locs`,
   `ipcheck_min_interval`, `ipcheck_max_per_day`.
+- **Connectivity checks stay direct:** `gstatic.com`, `www.apple.com`,
+  `msftconnecttest.com`, `msftncsi.com`, YouTube and the Android/Firefox captive-portal
+  endpoints are pinned to direct routing and are never ad-blocked, so a client's
+  "config ping" never depends on WARP. **`www.google.com` is the exception** — it stays
+  on WARP because the Gemini app uses it, and routing is per-domain (a URL path cannot
+  be split). Point your clients at `https://www.gstatic.com/generate_204` for a
+  WARP-independent ping.
 - **Tunnel safety:** a fail-open watchdog checks the engine every 20s. If sing-box or
   the divert path is ever unhealthy it removes the nftables rules automatically, so
   traffic falls back to direct and the server's tunnel keeps working; it re-applies

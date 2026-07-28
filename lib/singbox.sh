@@ -115,9 +115,22 @@ singbox_write_config() {
           #  - clients3/clients4.google.com: Android/client connectivity checks
           #    (generate_204) — client apps measure their "config ping" against
           #    these; they must never depend on WARP''s health.
-          [ { domain_suffix: [".youtube.com",".googlevideo.com",".ytimg.com",".ggpht.com"], outbound:"direct" },
+          # Connectivity-check endpoints are pinned to direct on purpose: client apps
+          # (V2rayNG & co) measure their "config ping" against them, so they must
+          # never depend on WARP being healthy.
+          # Two deliberate omissions:
+          #  - ".apple.com" would pull music.apple.com out of the Apple Music routing.
+          #  - "www.google.com" stays on WARP: the Gemini app talks to it, and routing
+          #    is per-domain, so it cannot be direct for /generate_204 and WARP for the
+          #    app. Point clients at gstatic.com/generate_204 for a WARP-independent ping.
+          [ { domain_suffix: [".youtube.com",".googlevideo.com",".ytimg.com",".ggpht.com",
+                              ".gstatic.com",".msftconnecttest.com",".msftncsi.com"], outbound:"direct" },
             { domain: ["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtubei.googleapis.com",
-                       "clients3.google.com","clients4.google.com"], outbound:"direct" } ]
+                       "clients3.google.com","clients4.google.com",
+                       "gstatic.com","www.gstatic.com","connectivitycheck.gstatic.com",
+                       "www.apple.com","captive.apple.com",
+                       "msftconnecttest.com","www.msftconnecttest.com","msftncsi.com","www.msftncsi.com",
+                       "detectportal.firefox.com"], outbound:"direct" } ]
           +
           # Ad blocker. The allow list is matched BEFORE the block rule so a false
           # positive can always be undone from the menu, and blocking happens before

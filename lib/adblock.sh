@@ -32,7 +32,7 @@ WM_ADBLOCK_MIN_RULES=10000
 # Never block these, whatever the lists say: client apps measure their "config ping"
 # against connectivity-check endpoints, and killing those makes every tunnel look
 # dead. Keep this list conservative.
-WM_ADBLOCK_SAFE_DOMAINS="gstatic.com connectivitycheck.gstatic.com clients3.google.com clients4.google.com captive.apple.com detectportal.firefox.com msftconnecttest.com msftncsi.com cloudflareclient.com cloudflare.com engage.cloudflareclient.com api.cloudflareclient.com"
+WM_ADBLOCK_SAFE_DOMAINS="gstatic.com www.gstatic.com connectivitycheck.gstatic.com clients3.google.com clients4.google.com www.google.com google.com youtube.com www.youtube.com googlevideo.com www.googlevideo.com apple.com www.apple.com captive.apple.com detectportal.firefox.com msftconnecttest.com www.msftconnecttest.com msftncsi.com www.msftncsi.com cloudflareclient.com cloudflare.com engage.cloudflareclient.com api.cloudflareclient.com"
 
 adblock_is_enabled() { [[ "$(conf_get adblock_enabled 0)" == "1" ]]; }
 adblock_enable()     { conf_set adblock_enabled 1; }
