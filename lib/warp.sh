@@ -285,9 +285,18 @@ warp_is_healthy() {
     warp_is_up || return 1
     local hs now
     hs="$(wg show "$WM_IFACE" latest-handshakes 2>/dev/null | awk '{print $2; exit}')"
-    [[ -n "$hs" && "$hs" != "0" ]] || return 1
     now="$(date +%s)"
-    (( now - hs < WM_WARP_HANDSHAKE_MAX_AGE ))
+    # Fast path: a recent handshake proves the peer is alive, no network needed.
+    if [[ -n "$hs" && "$hs" != "0" ]] && (( now - hs < WM_WARP_HANDSHAKE_MAX_AGE )); then
+        return 0
+    fi
+    # A stale handshake does NOT mean the tunnel is dead: WireGuard only rekeys while
+    # data is actually flowing, so an idle WARP legitimately looks old. Judging on age
+    # alone made the watchdog flip between "warp" and "degraded" and rebuild the engine
+    # every few minutes. Confirm with a real probe instead — which also revives the
+    # handshake when the peer is alive.
+    curl -s --interface "$(_warp_bind_addr)" --connect-timeout 4 --max-time 8 \
+         -o /dev/null "$CF_TRACE_URL" 2>/dev/null
 }
 
 warp_status_short() {

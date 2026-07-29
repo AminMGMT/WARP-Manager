@@ -230,12 +230,22 @@ watchdog_run() {
     # config assumes, rebuild it — otherwise a tunnel that came back stays unused,
     # or one that went away keeps black-holing the selected services.
     if singbox_is_up; then
-        local want have
+        local want have streak
         want="$(warp_is_healthy && echo warp || echo degraded)"
         have="$(cat "${WM_STATE_DIR}/singbox.mode" 2>/dev/null || echo warp)"
         if [[ "$want" != "$have" ]]; then
-            log_info "watchdog: WARP is now ${want}; rebuilding the engine config."
-            singbox_reload >/dev/null 2>&1 || true
+            # Rebuilding restarts the engine, so never do it on a single reading.
+            # Require the new state to hold for a few consecutive checks (~1 min);
+            # a transient blip then costs nothing instead of a restart.
+            streak=$(( $(cat "${WM_STATE_DIR}/mode.streak" 2>/dev/null || echo 0) + 1 ))
+            printf '%s' "$streak" >"${WM_STATE_DIR}/mode.streak" 2>/dev/null || true
+            if (( streak >= 3 )); then
+                log_info "watchdog: WARP is now ${want}; rebuilding the engine config."
+                rm -f "${WM_STATE_DIR}/mode.streak"
+                singbox_reload >/dev/null 2>&1 || true
+            fi
+        else
+            rm -f "${WM_STATE_DIR}/mode.streak" 2>/dev/null || true
         fi
     fi
     if ! singbox_is_up; then
