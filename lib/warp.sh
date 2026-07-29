@@ -255,6 +255,32 @@ warp_is_up() { systemctl is-active --quiet "wg-quick@${WM_IFACE}"; }
 # every selected site fails with a TLS "unexpected eof". Trust the handshake age
 # instead: WireGuard rekeys well inside two minutes while a peer is alive.
 WM_WARP_HANDSHAKE_MAX_AGE="${WM_WARP_HANDSHAKE_MAX_AGE:-180}"
+
+# Does WARP actually carry IPv6? wg-quick happily brings up an IPv6 address whose
+# path black-holes; sending traffic there shows up as tproxy6 dials timing out and
+# sites failing over IPv6 while IPv4 is fine (google.com dead, github.com fine).
+# So probe it instead of assuming, and cache the answer briefly — this is consulted
+# whenever the config or the nft rules are rebuilt.
+WM_V6_CACHE="${WM_STATE_DIR}/warp-v6-ok"
+WM_V6_CACHE_TTL=300
+warp_v6_works() {
+    wm_have_v6 || return 1
+    warp_is_up || return 1
+    if [[ -f "$WM_V6_CACHE" ]]; then
+        local age; age=$(( $(date +%s) - $(stat -c %Y "$WM_V6_CACHE" 2>/dev/null || echo 0) ))
+        if (( age < WM_V6_CACHE_TTL )); then [[ "$(cat "$WM_V6_CACHE" 2>/dev/null)" == "1" ]]; return $?; fi
+    fi
+    local a rc=1
+    a="$(ip -6 -o addr show dev "$WM_IFACE" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+    if [[ -n "$a" ]] \
+       && curl -s -6 --interface "$a" --connect-timeout 4 --max-time 8 -o /dev/null "$CF_TRACE_URL" 2>/dev/null; then
+        rc=0
+    fi
+    mkdir -p "$WM_STATE_DIR" 2>/dev/null
+    printf '%s' "$(( rc == 0 ? 1 : 0 ))" >"$WM_V6_CACHE" 2>/dev/null || true
+    return $rc
+}
+
 warp_is_healthy() {
     warp_is_up || return 1
     local hs now

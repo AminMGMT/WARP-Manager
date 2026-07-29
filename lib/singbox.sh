@@ -57,7 +57,13 @@ _singbox_geosite_url() {
 
 # Download a geosite rule-set if missing or stale. Never removes a usable file.
 singbox_fetch_ruleset() {
-    local name="$1" dest="${WM_RULESET_DIR}/geosite-${name}.srs" age tmp
+    # NOTE: declare first, then assign. A single `local a=$1 b=${a}` expands every
+    # value before any assignment happens, so under `set -u` (which the CLI enables)
+    # the second one aborts the function with "unbound variable" — silently turning
+    # every rule-set download into a failure.
+    local name dest age tmp
+    name="$1"
+    dest="${WM_RULESET_DIR}/geosite-${name}.srs"
     mkdir -p "$WM_RULESET_DIR"
     if [[ -s "$dest" ]]; then
         age=$(( $(date +%s) - $(stat -c %Y "$dest" 2>/dev/null || echo 0) ))
@@ -116,8 +122,9 @@ singbox_write_config() {
 
     # A tproxy inbound handles both TCP and UDP (QUIC), so sing-box can sniff the
     # SNI out of QUIC ClientHello too and route apps (not just browsers) via WARP.
-    # The IPv6 inbound is only added when the host actually has ::1 (many VPS don't).
-    local has_v6=false; wm_have_v6 && has_v6=true
+    # The IPv6 inbound exists only when IPv6 is actually diverted to us (see
+    # warp_v6_works); otherwise sing-box would accept v6 it cannot deliver.
+    local has_v6=false; warp_v6_works && has_v6=true
 
     # Ad blocker: wired in only when enabled, a list is built, AND the ads rule-set
     # file is really on disk — a missing file makes sing-box refuse to start.

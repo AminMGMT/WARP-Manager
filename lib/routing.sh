@@ -66,6 +66,10 @@ routing_apply() {
     has_cmd nft || die "nftables (nft) is not installed."
     _routing_iprules
     local qmode; qmode="$(routing_quic_mode)"
+    # Only divert IPv6 when WARP's IPv6 path is proven to work; otherwise v6 traffic
+    # would be sent into a black hole (see warp_v6_works) while v4 is perfectly fine.
+    local v6=0; warp_v6_works && v6=1
+    [[ "$v6" -eq 0 ]] && wm_have_v6 && log_warn "WARP has no working IPv6; IPv6 traffic will go direct."
     # v6 tproxy/mark lines are emitted only when the host has IPv6 (see the $( … )
     # blocks inside the ruleset), so a v4-only box stays clean.
     # Rebuild idempotently: ensure the table exists, delete it, then recreate — so a
@@ -92,8 +96,8 @@ table inet ${WM_NFT_TABLE} {
         type filter hook prerouting priority mangle; policy accept;
         meta mark ${WM_TPROXY_MARK} meta nfproto ipv4 meta l4proto tcp tproxy ip to 127.0.0.1:${WM_SINGBOX_PORT} accept
 $( [[ "$qmode" == route ]] && printf '        meta mark %s meta nfproto ipv4 meta l4proto udp tproxy ip to 127.0.0.1:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
-$( wm_have_v6 && printf '        meta mark %s meta nfproto ipv6 meta l4proto tcp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
-$( wm_have_v6 && [[ "$qmode" == route ]] && printf '        meta mark %s meta nfproto ipv6 meta l4proto udp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
+$( [[ "$v6" -eq 1 ]] && printf '        meta mark %s meta nfproto ipv6 meta l4proto tcp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
+$( [[ "$v6" -eq 1 && "$qmode" == route ]] && printf '        meta mark %s meta nfproto ipv6 meta l4proto udp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
     }
 
     # Mark locally-generated 80/443 TCP and 443 UDP so it is rerouted to lo (above).
@@ -111,8 +115,8 @@ $( wm_have_v6 && [[ "$qmode" == route ]] && printf '        meta mark %s meta nf
         ip6 daddr @${WM_XSET6} return
         meta nfproto ipv4 tcp dport { 80, 443 } meta mark set ${WM_TPROXY_MARK}
 $( [[ "$qmode" == route ]] && printf '        meta nfproto ipv4 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" )
-$( wm_have_v6 && printf '        meta nfproto ipv6 tcp dport { 80, 443 } meta mark set %s' "$WM_TPROXY_MARK" )
-$( wm_have_v6 && [[ "$qmode" == route ]] && printf '        meta nfproto ipv6 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" )
+$( [[ "$v6" -eq 1 ]] && printf '        meta nfproto ipv6 tcp dport { 80, 443 } meta mark set %s' "$WM_TPROXY_MARK" )
+$( [[ "$v6" -eq 1 && "$qmode" == route ]] && printf '        meta nfproto ipv6 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" )
     }
 $( [[ "$qmode" == light ]] && cat <<QEOF
 
