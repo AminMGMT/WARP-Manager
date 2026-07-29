@@ -119,10 +119,8 @@ singbox_write_config() {
     # The IPv6 inbound is only added when the host actually has ::1 (many VPS don't).
     local has_v6=false; wm_have_v6 && has_v6=true
 
-    # Ad blocker: only wired in when it is enabled AND a built list exists, so a
-    # missing/failed download can never leave sing-box pointing at a dead rule-set.
-    # same rule as the geosites above: only reference the ads rule-set when the file
-    # is really on disk, or sing-box would refuse to start
+    # Ad blocker: wired in only when enabled, a list is built, AND the ads rule-set
+    # file is really on disk — a missing file makes sing-box refuse to start.
     local ads=false ads_path="" ads_format="" allow_json='[]'
     if adblock_is_enabled && adblock_has_list \
        && [[ -n "$(singbox_available_rulesets "$WM_ADBLOCK_GEOSITE")" ]]; then
@@ -133,18 +131,18 @@ singbox_write_config() {
         [[ -z "$allow_json" ]] && allow_json='[]'
     fi
 
-    # If WARP is down, sending the selected services to it would blackhole them
-    # (mark -> table 51888 -> a device that is gone), which surfaces as TLS
-    # "unexpected eof" on every selected site. Degrade to direct instead: the
-    # services lose their clean IP but keep working, and the watchdog restores
-    # the WARP path as soon as the tunnel is back.
     # In light mode QUIC never reaches the engine (nft drops it), so the inbound is
     # TCP-only and the per-service QUIC block rules are pointless.
     local qmode; qmode="$(routing_quic_mode)"
     local net_json='null'; [[ "$qmode" == light ]] && net_json='"tcp"'
 
-    local warp_mode="warp"; warp_is_up || warp_mode="degraded"
-    [[ "$warp_mode" == "degraded" ]] && log_warn "WARP is down; selected services will go direct until it is back."
+    # Routing services into a dead tunnel black-holes them (mark -> table 51888 ->
+    # a device with no peer), which is what surfaces as TLS "unexpected eof" on every
+    # selected site. Judge by a real handshake, not just "the interface exists", and
+    # degrade to direct when there is none: the services lose their clean IP but keep
+    # working, and the watchdog switches back as soon as WARP recovers.
+    local warp_mode="warp"; warp_is_healthy || warp_mode="degraded"
+    [[ "$warp_mode" == "degraded" ]] && log_warn "WARP has no live handshake; selected services go direct until it recovers."
 
     jq -n \
         --argjson geos "$geos_json" \
@@ -287,17 +285,21 @@ EOF
 
 singbox_reload() {
     require_root
+    # Tell the watchdog everything below is intentional, so the gap while sing-box
+    # is down is not mistaken for a fault.
+    wm_maintenance_begin
+    # Take the divert rules down BEFORE anything else. Two reasons:
+    #  * writing the config downloads rule-sets, and with the rules up those very
+    #    downloads get diverted into the engine we are about to replace — which is
+    #    why every geosite fetch failed while plain curl worked from the shell.
+    #  * while sing-box restarts its tproxy socket is gone, so anything still being
+    #    diverted would be blackholed and look like the whole tunnel dropping.
+    # With the rules off, traffic (ours included) simply flows direct meanwhile.
+    local had_rules=0
+    if routing_installed; then had_rules=1; routing_teardown >/dev/null 2>&1; fi
+
     singbox_write_config
     if "$WM_SINGBOX_BIN" check -c "$WM_SINGBOX_CONF" >/dev/null 2>&1; then
-        # Tell the watchdog this restart is intentional, so the short gap while
-        # sing-box comes back is not treated as a failure and does not fail open.
-        wm_maintenance_begin
-        # Take the divert rules down FIRST. While sing-box is restarting its tproxy
-        # socket is gone, and any traffic still being diverted would be blackholed —
-        # that is what makes a reload look like the whole tunnel dropping. With the
-        # rules off, traffic simply flows direct for a moment.
-        local had_rules=0
-        if routing_installed; then had_rules=1; routing_teardown >/dev/null 2>&1; fi
         systemctl restart "${WM_SINGBOX_SERVICE}"
         if ! singbox_wait_ready 15; then
             log_error "sing-box did not start listening on ${WM_SINGBOX_PORT}; leaving traffic direct."
@@ -310,13 +312,10 @@ singbox_reload() {
     else
         log_error "sing-box config check failed:"
         "$WM_SINGBOX_BIN" check -c "$WM_SINGBOX_CONF" 2>&1 | sed 's/^/   /' >&2
-        # A rejected config means the engine may not be serving. Leaving the divert
-        # rules up would send every connection to a socket that is not there, which
-        # looks exactly like the whole server losing HTTPS. Fail open instead.
-        if ! singbox_is_listening && routing_installed; then
-            routing_teardown >/dev/null 2>&1
-            log_warn "Divert rules removed so traffic keeps flowing directly."
-        fi
+        # The divert rules are already down; leave them down so traffic keeps
+        # flowing directly rather than into an engine we could not configure.
+        wm_maintenance_end
+        log_warn "Traffic is flowing directly (engine left out of the path)."
         return 1
     fi
     if singbox_is_up; then log_info "sing-box reloaded."; else

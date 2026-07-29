@@ -227,7 +227,7 @@ watchdog_run() {
     # or one that went away keeps black-holing the selected services.
     if singbox_is_up; then
         local want have
-        want="$(warp_is_up && echo warp || echo degraded)"
+        want="$(warp_is_healthy && echo warp || echo degraded)"
         have="$(cat "${WM_STATE_DIR}/singbox.mode" 2>/dev/null || echo warp)"
         if [[ "$want" != "$have" ]]; then
             log_info "watchdog: WARP is now ${want}; rebuilding the engine config."

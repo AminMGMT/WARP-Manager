@@ -250,6 +250,20 @@ EOF
 
 warp_is_up() { systemctl is-active --quiet "wg-quick@${WM_IFACE}"; }
 
+# wg-quick reports "active" as soon as the interface exists, even when the tunnel
+# never completed a handshake — routing services into it then black-holes them and
+# every selected site fails with a TLS "unexpected eof". Trust the handshake age
+# instead: WireGuard rekeys well inside two minutes while a peer is alive.
+WM_WARP_HANDSHAKE_MAX_AGE="${WM_WARP_HANDSHAKE_MAX_AGE:-180}"
+warp_is_healthy() {
+    warp_is_up || return 1
+    local hs now
+    hs="$(wg show "$WM_IFACE" latest-handshakes 2>/dev/null | awk '{print $2; exit}')"
+    [[ -n "$hs" && "$hs" != "0" ]] || return 1
+    now="$(date +%s)"
+    (( now - hs < WM_WARP_HANDSHAKE_MAX_AGE ))
+}
+
 warp_status_short() {
     if warp_is_up; then
         echo "${C_GREEN}running${C_RESET}"
