@@ -65,21 +65,26 @@ singbox_fetch_ruleset() {
     fi
     tmp="$(mktemp)"
     if curl -fsSL --connect-timeout 15 --max-time 90 -o "$tmp" "$(_singbox_geosite_url "$name")" \
-       && [[ -s "$tmp" ]]; then
-        install -m 644 "$tmp" "$dest"; rm -f "$tmp"; return 0
+       && [[ -s "$tmp" ]] && install -m 644 "$tmp" "$dest"; then
+        rm -f "$tmp"; return 0
     fi
     rm -f "$tmp"
     # keep whatever we already had; only report failure when there is nothing
     [[ -s "$dest" ]]
 }
 
-# Echo the geosite names we actually have a local rule-set for.
+# Echo the geosite names we actually have a local rule-set for. The check is the
+# file on disk, never the fetch's exit status: sing-box refuses to start if the
+# config points at a rule-set that is not there, which would take the engine — and
+# with it every diverted connection — down. A missing category just goes unmatched.
 singbox_available_rulesets() {
-    local n
+    local n f
     for n in "$@"; do
         [[ -z "$n" ]] && continue
-        if singbox_fetch_ruleset "$n"; then printf '%s\n' "$n"
-        else log_warn "geosite '${n}' could not be downloaded; its category will not be matched."; fi
+        singbox_fetch_ruleset "$n" || true
+        f="${WM_RULESET_DIR}/geosite-${n}.srs"
+        if [[ -s "$f" ]]; then printf '%s\n' "$n"
+        else log_warn "geosite '${n}' is unavailable; its category will not be matched."; fi
     done
 }
 
@@ -116,8 +121,11 @@ singbox_write_config() {
 
     # Ad blocker: only wired in when it is enabled AND a built list exists, so a
     # missing/failed download can never leave sing-box pointing at a dead rule-set.
+    # same rule as the geosites above: only reference the ads rule-set when the file
+    # is really on disk, or sing-box would refuse to start
     local ads=false ads_path="" ads_format="" allow_json='[]'
-    if adblock_is_enabled && adblock_has_list && singbox_fetch_ruleset "$WM_ADBLOCK_GEOSITE"; then
+    if adblock_is_enabled && adblock_has_list \
+       && [[ -n "$(singbox_available_rulesets "$WM_ADBLOCK_GEOSITE")" ]]; then
         ads=true
         ads_path="$(adblock_ruleset_path)"
         ads_format="$(adblock_ruleset_format)"
@@ -302,6 +310,13 @@ singbox_reload() {
     else
         log_error "sing-box config check failed:"
         "$WM_SINGBOX_BIN" check -c "$WM_SINGBOX_CONF" 2>&1 | sed 's/^/   /' >&2
+        # A rejected config means the engine may not be serving. Leaving the divert
+        # rules up would send every connection to a socket that is not there, which
+        # looks exactly like the whole server losing HTTPS. Fail open instead.
+        if ! singbox_is_listening && routing_installed; then
+            routing_teardown >/dev/null 2>&1
+            log_warn "Divert rules removed so traffic keeps flowing directly."
+        fi
         return 1
     fi
     if singbox_is_up; then log_info "sing-box reloaded."; else
