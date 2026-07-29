@@ -41,6 +41,48 @@ singbox_install() {
     die "Could not install sing-box (network/GitHub blocked?)."
 }
 
+# --- geosite rule-sets, cached locally -----------------------------------
+# sing-box can fetch remote rule-sets itself, but that makes GitHub a RUNTIME
+# dependency: on a server where raw.githubusercontent.com is slow or filtered the
+# engine stalls or crash-loops at startup — and because every outbound 80/443 is
+# already being diverted into it, that takes the whole server's traffic down with
+# it. So we download them ourselves, keep them on disk, and hand sing-box local
+# files only. A failed download degrades to "this category is not matched" instead
+# of breaking the engine.
+WM_RULESET_DIR="${WM_STATE_DIR}/rulesets"
+WM_RULESET_MAX_AGE=$(( 7 * 86400 ))
+_singbox_geosite_url() {
+    printf 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-%s.srs' "$1"
+}
+
+# Download a geosite rule-set if missing or stale. Never removes a usable file.
+singbox_fetch_ruleset() {
+    local name="$1" dest="${WM_RULESET_DIR}/geosite-${name}.srs" age tmp
+    mkdir -p "$WM_RULESET_DIR"
+    if [[ -s "$dest" ]]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$dest" 2>/dev/null || echo 0) ))
+        (( age < WM_RULESET_MAX_AGE )) && return 0
+    fi
+    tmp="$(mktemp)"
+    if curl -fsSL --connect-timeout 15 --max-time 90 -o "$tmp" "$(_singbox_geosite_url "$name")" \
+       && [[ -s "$tmp" ]]; then
+        install -m 644 "$tmp" "$dest"; rm -f "$tmp"; return 0
+    fi
+    rm -f "$tmp"
+    # keep whatever we already had; only report failure when there is nothing
+    [[ -s "$dest" ]]
+}
+
+# Echo the geosite names we actually have a local rule-set for.
+singbox_available_rulesets() {
+    local n
+    for n in "$@"; do
+        [[ -z "$n" ]] && continue
+        if singbox_fetch_ruleset "$n"; then printf '%s\n' "$n"
+        else log_warn "geosite '${n}' could not be downloaded; its category will not be matched."; fi
+    done
+}
+
 # --- generate the sing-box config from the enabled providers -------------
 singbox_write_config() {
     ensure_dirs
@@ -54,6 +96,10 @@ singbox_write_config() {
         # split the space-separated domain list into one-per-line (shell-agnostic)
         prov_field "$id" domains | tr ' ' '\n' >>"$domsf"
     done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
+
+    # keep only the categories we have a local rule-set for (see above)
+    local avail; avail="$(singbox_available_rulesets $(grep -vE '^[[:space:]]*$' "$geosf" | sort -u))"
+    printf '%s\n' "$avail" >"$geosf"
 
     local geos_json doms_json
     geos_json="$(grep -vE '^[[:space:]]*$' "$geosf" | sort -u | jq -R . | jq -s .)"
@@ -71,13 +117,21 @@ singbox_write_config() {
     # Ad blocker: only wired in when it is enabled AND a built list exists, so a
     # missing/failed download can never leave sing-box pointing at a dead rule-set.
     local ads=false ads_path="" ads_format="" allow_json='[]'
-    if adblock_is_enabled && adblock_has_list; then
+    if adblock_is_enabled && adblock_has_list && singbox_fetch_ruleset "$WM_ADBLOCK_GEOSITE"; then
         ads=true
         ads_path="$(adblock_ruleset_path)"
         ads_format="$(adblock_ruleset_format)"
         allow_json="$(adblock_allow_domains | jq -R . | jq -s .)"
         [[ -z "$allow_json" ]] && allow_json='[]'
     fi
+
+    # If WARP is down, sending the selected services to it would blackhole them
+    # (mark -> table 51888 -> a device that is gone), which surfaces as TLS
+    # "unexpected eof" on every selected site. Degrade to direct instead: the
+    # services lose their clean IP but keep working, and the watchdog restores
+    # the WARP path as soon as the tunnel is back.
+    local warp_mode="warp"; warp_is_up || warp_mode="degraded"
+    [[ "$warp_mode" == "degraded" ]] && log_warn "WARP is down; selected services will go direct until it is back."
 
     jq -n \
         --argjson geos "$geos_json" \
@@ -88,6 +142,8 @@ singbox_write_config() {
         --arg adspath "$ads_path" \
         --arg adsformat "$ads_format" \
         --arg adsgeosite "$WM_ADBLOCK_GEOSITE" \
+        --arg rsdir "$WM_RULESET_DIR" \
+        --arg warpmode "$warp_mode" \
         --arg port "$WM_SINGBOX_PORT" \
         --arg warpmark "$WM_MARK_WARP" \
         --arg dirmark "$WM_MARK_DIRECT" '
@@ -102,7 +158,11 @@ singbox_write_config() {
             else [] end )
       ),
       outbounds: [
-        { type:"direct", tag:"warp",   routing_mark:($warpmark|tonumber) },
+        # In degraded mode the "warp" outbound is a plain direct one: the tunnel is
+        # down, so marking would only send the traffic into a black hole.
+        ( if $warpmode == "warp"
+          then { type:"direct", tag:"warp", routing_mark:($warpmark|tonumber) }
+          else { type:"direct", tag:"warp", routing_mark:($dirmark|tonumber) } end ),
         { type:"direct", tag:"direct", routing_mark:($dirmark|tonumber) },
         { type:"block",  tag:"block" }
       ],
@@ -156,23 +216,26 @@ singbox_write_config() {
           ( if ($domains|length) > 0 then [ { domain: $domains, outbound:"warp" },
                                             { domain_suffix: ($domains|map("."+.)), outbound:"warp" } ] else [] end )
         ),
+        # All rule-sets are local files: sing-box never reaches out to GitHub while
+        # it is on the traffic path (see singbox_fetch_ruleset).
         rule_set: ( ( $geos | map({
-          tag:("geosite-"+.), type:"remote", format:"binary",
-          url:("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-"+.+".srs"),
-          download_detour:"direct", update_interval:"24h"
+          tag:("geosite-"+.), type:"local", format:"binary",
+          path:($rsdir + "/geosite-" + . + ".srs")
         }) )
         + ( if $ads
             then [ # locally built from the AdGuard DNS filter
                    { tag:"adguard-ads", type:"local", format:$adsformat, path:$adspath },
-                   # second source: ready-made ads rule-set, refreshed by sing-box
-                   { tag:("geosite-"+$adsgeosite), type:"remote", format:"binary",
-                     url:("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-"+$adsgeosite+".srs"),
-                     download_detour:"direct", update_interval:"24h" } ]
+                   # second source: the ready-made ads rule-set, also cached locally
+                   { tag:("geosite-"+$adsgeosite), type:"local", format:"binary",
+                     path:($rsdir + "/geosite-" + $adsgeosite + ".srs") } ]
             else [] end ) ),
         final: "direct"
       }
     }' > "$WM_SINGBOX_CONF"
     chmod 644 "$WM_SINGBOX_CONF"
+    # remember which mode this config was written for, so the watchdog can rebuild
+    # it when WARP comes back (or goes away) instead of leaving it stale
+    printf '%s\n' "$warp_mode" >"${WM_STATE_DIR}/singbox.mode" 2>/dev/null || true
     if [[ "$ads" == true ]]; then
         log_info "sing-box config written (${ng} rule-sets, ${nd} domains, ad blocker on: $(adblock_count) domains)."
     else
@@ -210,8 +273,20 @@ singbox_reload() {
         # Tell the watchdog this restart is intentional, so the short gap while
         # sing-box comes back is not treated as a failure and does not fail open.
         wm_maintenance_begin
+        # Take the divert rules down FIRST. While sing-box is restarting its tproxy
+        # socket is gone, and any traffic still being diverted would be blackholed —
+        # that is what makes a reload look like the whole tunnel dropping. With the
+        # rules off, traffic simply flows direct for a moment.
+        local had_rules=0
+        if routing_installed; then had_rules=1; routing_teardown >/dev/null 2>&1; fi
         systemctl restart "${WM_SINGBOX_SERVICE}"
-        sleep 1
+        if ! singbox_wait_ready 15; then
+            log_error "sing-box did not start listening on ${WM_SINGBOX_PORT}; leaving traffic direct."
+            wm_maintenance_end
+            return 1
+        fi
+        # Only now is it safe to send traffic back through the engine.
+        [[ "$had_rules" -eq 1 ]] && routing_apply >/dev/null 2>&1
         wm_maintenance_end
     else
         log_error "sing-box config check failed:"
@@ -225,3 +300,20 @@ singbox_reload() {
 }
 
 singbox_is_up() { systemctl is-active --quiet "${WM_SINGBOX_SERVICE}"; }
+
+# systemd calling the unit "active" is not enough: traffic is only safe once the
+# tproxy socket is really accepting. Everything diverted before that is blackholed.
+singbox_is_listening() {
+    ss -lnt 2>/dev/null | grep -q ":${WM_SINGBOX_PORT}[[:space:]]" \
+        || ss -lnu 2>/dev/null | grep -q ":${WM_SINGBOX_PORT}[[:space:]]"
+}
+
+# Wait up to N seconds for the engine to actually accept connections.
+singbox_wait_ready() {
+    local n="${1:-15}"
+    while (( n-- > 0 )); do
+        singbox_is_listening && return 0
+        sleep 1
+    done
+    return 1
+}

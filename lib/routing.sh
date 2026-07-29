@@ -185,6 +185,20 @@ watchdog_run() {
     # Keep the menu's exit-IP cache warm; this runs every 20s anyway, so the header
     # is correct shortly after WARP comes up without anyone opening the menu.
     _warp_cache_stale && warp_cache_refresh_bg
+
+    # The config is written either for a working WARP tunnel or for "degraded"
+    # (selected services go direct). If reality no longer matches what the running
+    # config assumes, rebuild it — otherwise a tunnel that came back stays unused,
+    # or one that went away keeps black-holing the selected services.
+    if singbox_is_up; then
+        local want have
+        want="$(warp_is_up && echo warp || echo degraded)"
+        have="$(cat "${WM_STATE_DIR}/singbox.mode" 2>/dev/null || echo warp)"
+        if [[ "$want" != "$have" ]]; then
+            log_info "watchdog: WARP is now ${want}; rebuilding the engine config."
+            singbox_reload >/dev/null 2>&1 || true
+        fi
+    fi
     if ! singbox_is_up; then
         if routing_installed; then
             routing_teardown
