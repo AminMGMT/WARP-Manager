@@ -197,18 +197,36 @@ warp_ensure_config() {
     [[ -f "$WM_WG_CONF" ]]
 }
 
+# Hash of the wg config the interface was last brought up with, so warp_up can tell
+# a real config change from a redundant call.
+WM_WG_CONF_STAMP="${WM_STATE_DIR}/wgconf.sha1"
+_warp_conf_stamp()   { sha1sum "$WM_WG_CONF" 2>/dev/null | cut -d' ' -f1 >"$WM_WG_CONF_STAMP" 2>/dev/null || true; }
+_warp_conf_changed() {
+    [[ -s "$WM_WG_CONF_STAMP" ]] || return 0     # never stamped: assume changed
+    [[ "$(sha1sum "$WM_WG_CONF" 2>/dev/null | cut -d' ' -f1)" != "$(cat "$WM_WG_CONF_STAMP" 2>/dev/null)" ]]
+}
+
 warp_up() {
     require_root
     warp_ensure_config || { log_error "WARP is not configured (registration blocked?). Import an account or retry."; return 1; }
     _warp_sysctl
     systemctl enable "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
     if systemctl is-active --quiet "wg-quick@${WM_IFACE}"; then
+        # Restarting the tunnel drops every connection riding it and forces the
+        # engine to reload behind it, so don't do it for nothing: if the tunnel is
+        # healthy and the generated config is byte-for-byte what it is already
+        # running, leave it alone.
+        if warp_is_healthy && ! _warp_conf_changed; then
+            log_info "WARP is already up and healthy; left untouched."
+            return 0
+        fi
         systemctl restart "wg-quick@${WM_IFACE}"
     else
         systemctl start "wg-quick@${WM_IFACE}"
     fi
     sleep 1
     if systemctl is-active --quiet "wg-quick@${WM_IFACE}"; then
+        _warp_conf_stamp
         log_info "WARP interface (${WM_IFACE}) is up."
     else
         log_error "Failed to bring up the WARP interface:"
