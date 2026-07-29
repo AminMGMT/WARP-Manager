@@ -106,8 +106,7 @@ warp_import_account() {
         return 1
     fi
     local lic; lic="$(conf_get license_key)"; [[ -n "$lic" ]] && warp_apply_license "$lic"
-    warp_write_conf
-    warp_up
+    warp_up                     # regenerates the wg config itself (warp_ensure_config)
     log_info "Account imported. WARP exit: $(warp_trace_ip)"
 }
 
@@ -383,8 +382,7 @@ warp_change_ip() {
     warp_register || { log_error "Registration failed (rate-limited?). Keeping previous account if any."; return 1; }
     local lic; lic="$(conf_get license_key)"
     [[ -n "$lic" ]] && warp_apply_license "$lic"
-    warp_write_conf
-    warp_up
+    warp_up                     # regenerates the wg config itself (warp_ensure_config)
     log_info "New WARP IP: $(warp_trace_ip)"
 }
 

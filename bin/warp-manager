@@ -399,7 +399,7 @@ menu_license() {
         read -rp " > " ch
         case "$ch" in
             s|S) read -rp " WARP+ key: " key
-                 [[ -n "$key" ]] && { warp_apply_license "$key" && { warp_write_conf; warp_up; singbox_reload; }; pause; } ;;
+                 [[ -n "$key" ]] && { warp_apply_license "$key" && { warp_up; singbox_reload; }; pause; } ;;
             c|C) warp_clear_license; pause ;;
             0|"") return ;;
         esac
@@ -554,7 +554,7 @@ case "${1:-}" in
     --change-ip) require_root; warp_change_ip && singbox_reload; exit $? ;;
     --import-account) require_root; warp_import_account "${2:-}" && engine_apply; exit $? ;;
     --location)  warp_location; exit 0 ;;
-    --license)   require_root; warp_apply_license "${2:-}" && { warp_write_conf; warp_up; singbox_reload; }; exit $? ;;
+    --license)   require_root; warp_apply_license "${2:-}" && { warp_up; singbox_reload; }; exit $? ;;
     --status)    status_line; exit 0 ;;
     --watchdog)  watchdog_run; exit 0 ;;
     --adblock-update) require_root; adblock_refresh; exit $? ;;
