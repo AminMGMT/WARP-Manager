@@ -314,6 +314,40 @@ action_change_ip() {
     pause
 }
 
+menu_quic() {
+    while true; do
+        banner
+        local m; m="$(routing_quic_mode)"
+        printf '\n %sQUIC handling%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf ' How the engine deals with UDP 443 (HTTP/3). Apps work either way —\n'
+        printf ' in light mode they fall back to TCP, which is what goes through WARP.\n\n'
+        if [[ "$m" == light ]]; then
+            printf '   Mode  %slight%s  — QUIC dropped, engine handles TCP only\n' "$C_GREEN" "$C_RESET"
+            printf '   %sLowest load and fewest moving parts on a busy relay.%s\n' "$C_GRAY" "$C_RESET"
+        else
+            printf '   Mode  %sroute%s  — QUIC goes through the engine\n' "$C_WHITE" "$C_RESET"
+            printf '   %sKeeps QUIC working for everything except the selected services;%s\n' "$C_GRAY" "$C_RESET"
+            printf '   %scosts more CPU/memory because every UDP session is tracked.%s\n' "$C_GRAY" "$C_RESET"
+        fi
+        printf '\n   %ss%s  Switch to %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$([[ "$m" == light ]] && echo route || echo light)"
+        printf '   %s0%s  Back\n\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            s|S) if [[ "$m" == light ]]; then conf_set quic_mode route; else conf_set quic_mode light; fi
+                 printf '\n %sApplying...%s\n' "$C_GRAY" "$C_RESET"
+                 if singbox_reload >/dev/null 2>&1; then
+                     routing_installed && routing_apply >/dev/null 2>&1
+                     routing_load_exclusions
+                     printf ' %sQUIC mode is now %s.%s\n' "$C_GREEN" "$(routing_quic_mode)" "$C_RESET"
+                 else
+                     printf ' %sCould not apply — check Status.%s\n' "$C_RED" "$C_RESET"
+                 fi
+                 pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 menu_ipcheck() {
     while true; do
         banner
@@ -428,19 +462,22 @@ menu_manage() {
         printf '   %s1%s  Change IP\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s2%s  Auto IP Health  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
             "$(ipcheck_is_enabled && printf '%s● on%s' "$C_GREEN" "$C_RESET" || printf '%s○ off%s' "$C_GRAY" "$C_RESET")"
-        printf '   %s3%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s4%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s5%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s6%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s3%s  QUIC handling  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+            "$([[ "$(routing_quic_mode)" == light ]] && printf '%slight%s' "$C_GREEN" "$C_RESET" || printf '%sroute%s' "$C_GRAY" "$C_RESET")"
+        printf '   %s4%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s5%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s6%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s7%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         read -rp $'\n > ' ch
         case "$ch" in
             1) action_change_ip ;;
             2) menu_ipcheck ;;
-            3) menu_license ;;
-            4) action_status ;;
-            5) action_restart ;;
-            6) action_import ;;
+            3) menu_quic ;;
+            4) menu_license ;;
+            5) action_status ;;
+            6) action_restart ;;
+            7) action_import ;;
             0|"") return ;;
         esac
     done

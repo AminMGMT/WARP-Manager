@@ -48,10 +48,24 @@ _routing_iprules_del() {
     ip -6 route flush table 100 2>/dev/null || true
 }
 
+# How UDP 443 (QUIC) is handled:
+#   route - divert it into sing-box like TCP. QUIC of the selected services is
+#           blocked there so apps fall back to TCP, everything else passes through.
+#           Most capable, but sing-box has to track every UDP session on the box.
+#   light - never send UDP through the engine; drop QUIC at the nft level instead.
+#           Apps still work (they fall back to TCP, which is the path we route via
+#           WARP anyway) and the engine only ever handles TCP — roughly half the
+#           work and far fewer moving parts on a busy relay.
+routing_quic_mode() {
+    local m; m="$(conf_get quic_mode route)"
+    [[ "$m" == "light" ]] && printf 'light' || printf 'route'
+}
+
 routing_apply() {
     require_root
     has_cmd nft || die "nftables (nft) is not installed."
     _routing_iprules
+    local qmode; qmode="$(routing_quic_mode)"
     # v6 tproxy/mark lines are emitted only when the host has IPv6 (see the $( … )
     # blocks inside the ruleset), so a v4-only box stays clean.
     # Rebuild idempotently: ensure the table exists, delete it, then recreate — so a
@@ -77,8 +91,9 @@ table inet ${WM_NFT_TABLE} {
     chain mangle_prerouting {
         type filter hook prerouting priority mangle; policy accept;
         meta mark ${WM_TPROXY_MARK} meta nfproto ipv4 meta l4proto tcp tproxy ip to 127.0.0.1:${WM_SINGBOX_PORT} accept
-        meta mark ${WM_TPROXY_MARK} meta nfproto ipv4 meta l4proto udp tproxy ip to 127.0.0.1:${WM_SINGBOX_PORT} accept
-$( wm_have_v6 && printf '        meta mark %s meta nfproto ipv6 meta l4proto tcp tproxy ip6 to [::1]:%s accept\n        meta mark %s meta nfproto ipv6 meta l4proto udp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
+$( [[ "$qmode" == route ]] && printf '        meta mark %s meta nfproto ipv4 meta l4proto udp tproxy ip to 127.0.0.1:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
+$( wm_have_v6 && printf '        meta mark %s meta nfproto ipv6 meta l4proto tcp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
+$( wm_have_v6 && [[ "$qmode" == route ]] && printf '        meta mark %s meta nfproto ipv6 meta l4proto udp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
     }
 
     # Mark locally-generated 80/443 TCP and 443 UDP so it is rerouted to lo (above).
@@ -95,13 +110,33 @@ $( wm_have_v6 && printf '        meta mark %s meta nfproto ipv6 meta l4proto tcp
         ip  daddr @${WM_XSET4} return
         ip6 daddr @${WM_XSET6} return
         meta nfproto ipv4 tcp dport { 80, 443 } meta mark set ${WM_TPROXY_MARK}
-        meta nfproto ipv4 udp dport 443 meta mark set ${WM_TPROXY_MARK}
-$( wm_have_v6 && printf '        meta nfproto ipv6 tcp dport { 80, 443 } meta mark set %s\n        meta nfproto ipv6 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" "$WM_TPROXY_MARK" )
+$( [[ "$qmode" == route ]] && printf '        meta nfproto ipv4 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" )
+$( wm_have_v6 && printf '        meta nfproto ipv6 tcp dport { 80, 443 } meta mark set %s' "$WM_TPROXY_MARK" )
+$( wm_have_v6 && [[ "$qmode" == route ]] && printf '        meta nfproto ipv6 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" )
     }
+$( [[ "$qmode" == light ]] && cat <<QEOF
+
+    # light mode: QUIC never reaches the engine. Dropping it makes clients fall back
+    # to TCP, which is the path we actually route through WARP.
+    chain quic_drop {
+        type filter hook output priority 0; policy accept;
+        oifname "${WM_IFACE}" return
+        meta mark ${WM_MARK_HEX} return
+        meta mark 0xcab1 return
+        ip  daddr @${WM_XSET4} return
+        ip6 daddr @${WM_XSET6} return
+        udp dport 443 drop
+    }
+QEOF
+)
 }
 EOF
     routing_load_exclusions
-    log_info "nftables TPROXY rules applied (TCP 80/443 + UDP 443 → sing-box)."
+    if [[ "$qmode" == light ]]; then
+        log_info "nftables rules applied (TCP 80/443 → sing-box; QUIC dropped, clients use TCP)."
+    else
+        log_info "nftables TPROXY rules applied (TCP 80/443 + UDP 443 → sing-box)."
+    fi
 }
 
 # private/reserved ranges + the WARP endpoint IPs are never routed via WARP

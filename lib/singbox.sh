@@ -130,6 +130,11 @@ singbox_write_config() {
     # "unexpected eof" on every selected site. Degrade to direct instead: the
     # services lose their clean IP but keep working, and the watchdog restores
     # the WARP path as soon as the tunnel is back.
+    # In light mode QUIC never reaches the engine (nft drops it), so the inbound is
+    # TCP-only and the per-service QUIC block rules are pointless.
+    local qmode; qmode="$(routing_quic_mode)"
+    local net_json='null'; [[ "$qmode" == light ]] && net_json='"tcp"'
+
     local warp_mode="warp"; warp_is_up || warp_mode="degraded"
     [[ "$warp_mode" == "degraded" ]] && log_warn "WARP is down; selected services will go direct until it is back."
 
@@ -144,17 +149,20 @@ singbox_write_config() {
         --arg adsgeosite "$WM_ADBLOCK_GEOSITE" \
         --arg rsdir "$WM_RULESET_DIR" \
         --arg warpmode "$warp_mode" \
+        --argjson net "$net_json" \
         --arg port "$WM_SINGBOX_PORT" \
         --arg warpmark "$WM_MARK_WARP" \
         --arg dirmark "$WM_MARK_DIRECT" '
     {
       log: { level: "warn", timestamp: true },
       inbounds: (
-        [ { type:"tproxy", tag:"tproxy4", listen:"127.0.0.1", listen_port:($port|tonumber),
-            sniff:true, sniff_override_destination:false } ]
+        [ ( { type:"tproxy", tag:"tproxy4", listen:"127.0.0.1", listen_port:($port|tonumber),
+              sniff:true, sniff_override_destination:false }
+            + ( if $net then {network:$net} else {} end ) ) ]
         + ( if $has_v6 then
-              [ { type:"tproxy", tag:"tproxy6", listen:"::1", listen_port:($port|tonumber),
-                  sniff:true, sniff_override_destination:false } ]
+              [ ( { type:"tproxy", tag:"tproxy6", listen:"::1", listen_port:($port|tonumber),
+                    sniff:true, sniff_override_destination:false }
+                  + ( if $net then {network:$net} else {} end ) ) ]
             else [] end )
       ),
       outbounds: [
@@ -202,14 +210,17 @@ singbox_write_config() {
           +
           ( if $ads then [ { rule_set: ["adguard-ads","geosite-"+$adsgeosite], outbound:"block" } ] else [] end )
           +
-          # Block QUIC (UDP) of the SELECTED services first, so the app falls back to
-          # TCP — which we route through WARP reliably. QUIC-over-WARP is flaky (UDP
-          # through the tunnel), and a native app that sticks to QUIC would otherwise
-          # hang. Non-selected traffic keeps its QUIC (goes direct untouched).
-          ( if ($geos|length)    > 0 then [ { network:"udp", rule_set: ($geos|map("geosite-"+.)), outbound:"block" } ] else [] end )
-          +
-          ( if ($domains|length) > 0 then [ { network:"udp", domain: $domains, outbound:"block" },
-                                            { network:"udp", domain_suffix: ($domains|map("."+.)), outbound:"block" } ] else [] end )
+          # Block QUIC (UDP) of the SELECTED services, so the app falls back to TCP —
+          # which we route through WARP reliably. QUIC-over-WARP is flaky (UDP through
+          # the tunnel), and a native app that sticks to QUIC would otherwise hang.
+          # Skipped entirely in light mode: there, nft already drops QUIC before it
+          # can reach the engine, so no UDP ever arrives here.
+          ( if $net then [] else
+            ( if ($geos|length)    > 0 then [ { network:"udp", rule_set: ($geos|map("geosite-"+.)), outbound:"block" } ] else [] end )
+            +
+            ( if ($domains|length) > 0 then [ { network:"udp", domain: $domains, outbound:"block" },
+                                              { network:"udp", domain_suffix: ($domains|map("."+.)), outbound:"block" } ] else [] end )
+            end )
           +
           ( if ($geos|length)    > 0 then [ { rule_set: ($geos|map("geosite-"+.)), outbound:"warp" } ] else [] end )
           +
