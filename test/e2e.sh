@@ -8,7 +8,7 @@ WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 [[ -f "${WM_ROOT}/lib/common.sh" ]] || WM_ROOT="/opt/warp-manager"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock ipcheck singbox; do source "${WM_ROOT}/lib/${lib}.sh"; done
+for lib in common warp routing providers adblock ipcheck singbox automation presets; do source "${WM_ROOT}/lib/${lib}.sh"; done
 
 PASS=0; FAIL=0; SKIP=0
 ok()      { printf '  %s✔ PASS%s  %s\n' "$C_GREEN" "$C_RESET" "$1"; PASS=$((PASS+1)); }

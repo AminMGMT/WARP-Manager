@@ -8,7 +8,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock ipcheck singbox; do
+for lib in common warp routing providers adblock ipcheck singbox automation presets; do
     src="${WM_ROOT}/lib/${lib}.sh"
     [[ -f "$src" ]] || { echo "Library not found: $src" >&2; exit 1; }
     source "$src"
@@ -329,6 +329,7 @@ engine_apply() {
     routing_load_exclusions
     watchdog_service_setup                   # fail-open guard: tunnel can never die
     ipcheck_timer_setup                      # auto exit-IP health check (if enabled)
+    autorestart_timer_setup                  # scheduled restart (if enabled)
     rm -f "$WM_WATCHDOG_STATE" 2>/dev/null   # fresh apply clears any fail-open state
     warp_trace_ip >/dev/null 2>&1 || true   # warm the exit-IP cache for the header
 }
@@ -338,7 +339,7 @@ apply_pretty() {
     printf '\n %sApplying%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
     if ! warp_is_up; then
         printf ' %sStarting WARP...%s\n' "$C_GRAY" "$C_RESET"
-        warp_up || { printf ' %sWARP could not start (rate-limited?). Manage → Import Account.%s\n' "$C_RED" "$C_RESET"; pause; return; }
+        warp_up || { printf ' %sWARP could not start (rate-limited?). WARP → Presets → Import WARP Account.%s\n' "$C_RED" "$C_RESET"; pause; return; }
     fi
 
     enabled_summary
@@ -382,13 +383,17 @@ menu_custom_domains() {
 }
 
 # =========================================================================
-# Ad Blocker
+# White Lists — domains the ad blocker must never block
 # =========================================================================
+# Self-contained: it rebuilds the list on the way out, so it works the same whether
+# it is opened from the WARP menu or anywhere else.
 menu_whitelist() {
+    local dirty=0
     while true; do
         banner
-        printf '\n %sAd Blocker — Allowed Domains%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
-        printf ' %sDomains here are never blocked. Add one if a site breaks.%s\n\n' "$C_GRAY" "$C_RESET"
+        printf '\n %sWhite Lists%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf ' %sDomains here are never blocked by the ad blocker.%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %sAdd one if a site breaks while the ad blocker is on.%s\n\n' "$C_GRAY" "$C_RESET"
         if [[ -s "$WM_ADBLOCK_WHITELIST" ]] && grep -qvE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST"; then
             grep -nvE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST" | sed 's/^/   /'
         else
@@ -398,17 +403,29 @@ menu_whitelist() {
             "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
         read -rp " > " ch
         case "$ch" in
-            0|"") return ;;
+            0|"")
+                # a changed allow list only takes effect after a rebuild + reload
+                if [[ "$dirty" -eq 1 ]] && adblock_is_enabled; then
+                    printf '\n %sApplying...%s\n' "$C_GRAY" "$C_RESET"
+                    adblock_refresh >/dev/null 2>&1 \
+                        && printf ' %sApplied.%s\n' "$C_GREEN" "$C_RESET" \
+                        || printf ' %sCould not apply — try Ad Blocker → Update list.%s\n' "$C_RED" "$C_RESET"
+                    sleep 1
+                fi
+                return ;;
             +) read -rp " Domain to allow: " d
-               [[ -n "$d" ]] && { adblock_whitelist_add "$d"; WM_ADBLOCK_DIRTY=1; } ;;
+               [[ -n "$d" ]] && { adblock_whitelist_add "$d"; dirty=1; } ;;
             -) read -rp " Domain to remove: " d
-               [[ -n "$d" ]] && { adblock_whitelist_remove "$d"; WM_ADBLOCK_DIRTY=1; } ;;
+               [[ -n "$d" ]] && { adblock_whitelist_remove "$d"; dirty=1; } ;;
         esac
     done
 }
 
+# =========================================================================
+# Ad Blocker
+# =========================================================================
+
 menu_adblock() {
-    WM_ADBLOCK_DIRTY=0
     while true; do
         banner
         printf '\n %sAd Blocker%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
@@ -427,8 +444,8 @@ menu_adblock() {
         printf ' %susing the AdGuard DNS filter. No extra service runs.%s\n' "$C_GRAY" "$C_RESET"
         printf '\n   %st%s  Turn %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(adblock_is_enabled && echo off || echo on)"
         printf '   %su%s  Update list now\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %sw%s  Allowed domains (fix a blocked site)\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s0%s  Back\n\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '\n %sA blocked site is fixed under WARP → White Lists.%s\n\n' "$C_DIM" "$C_RESET"
         read -rp " > " ch
         case "$ch" in
             t|T)
@@ -459,31 +476,19 @@ menu_adblock() {
                         singbox_reload >/dev/null 2>&1
                     fi
                 fi
-                WM_ADBLOCK_DIRTY=0
                 pause ;;
             u|U)
                 printf '\n %sRefreshing the ad list...%s\n' "$C_GRAY" "$C_RESET"
                 if adblock_refresh; then printf ' %sUpdated: %s domains.%s\n' "$C_GREEN" "$(adblock_count)" "$C_RESET"
                 else printf ' %sUpdate failed — the previous list is still in use.%s\n' "$C_RED" "$C_RESET"; fi
-                WM_ADBLOCK_DIRTY=0
                 pause ;;
-            w|W) menu_whitelist ;;
-            0|"")
-                # a changed allow list only takes effect after a rebuild + reload
-                if [[ "${WM_ADBLOCK_DIRTY:-0}" -eq 1 ]] && adblock_is_enabled; then
-                    printf '\n %sApplying the allowed-domain changes...%s\n' "$C_GRAY" "$C_RESET"
-                    adblock_refresh >/dev/null 2>&1 \
-                        && printf ' %sApplied.%s\n' "$C_GREEN" "$C_RESET" \
-                        || printf ' %sCould not apply — try Update list.%s\n' "$C_RED" "$C_RESET"
-                    sleep 1
-                fi
-                return ;;
+            0|"") return ;;
         esac
     done
 }
 
 # =========================================================================
-# Manage submenu
+# Connection
 # =========================================================================
 action_change_ip() {
     banner
@@ -614,48 +619,283 @@ action_status() {
     pause
 }
 
-action_restart() {
+# Restart the tunnel only. The engine config depends on WARP's health (it degrades
+# to direct when there is no handshake), so it is rebuilt afterwards either way.
+action_restart_warp() {
     banner
-    printf '\n %sRestart engine%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
-    if warp_is_up; then warp_restart; fi
-    if engine_apply; then printf ' %sEngine restarted.%s\n' "$C_GREEN" "$C_RESET"; else printf ' %sSomething failed — check status.%s\n' "$C_RED" "$C_RESET"; fi
+    printf '\n %sRestart WARP%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    wm_maintenance_begin
+    if warp_is_up; then warp_restart; else warp_up; fi
+    if warp_is_up; then
+        printf ' %sWARP is up. Exit IP: %s%s\n' "$C_GREEN" "$(warp_trace_ip)" "$C_RESET"
+    else
+        printf ' %sWARP did not come up (rate-limited?). Try Presets → Import WARP Account.%s\n' "$C_RED" "$C_RESET"
+    fi
+    singbox_reload >/dev/null 2>&1 || printf ' %sThe engine could not be reloaded — check Status.%s\n' "$C_RED" "$C_RESET"
+    wm_maintenance_end
     pause
 }
 
-action_import() {
+# Everything: tunnel, engine, redirect rules and the background timers.
+action_restart_all() {
+    banner
+    printf '\n %sRestart All Services%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    printf ' %sWARP, the routing engine, the redirect rules and the timers.%s\n\n' "$C_GRAY" "$C_RESET"
+    wm_maintenance_begin
+    if warp_is_up; then warp_restart; fi
+    if engine_apply; then
+        printf ' %sAll services restarted.%s\n' "$C_GREEN" "$C_RESET"
+    else
+        printf ' %sSomething failed — check WARP → Status.%s\n' "$C_RED" "$C_RESET"
+    fi
+    wm_maintenance_end
+    pause
+}
+
+action_import_account() {
     banner
     printf '\n %sImport WARP account%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
     printf ' Use this if registration is rate-limited (429) on this server.\n'
     printf ' Copy %swgcf-account.toml%s from a working server, then give its path.\n\n' "$C_WHITE" "$C_RESET"
+    printf ' %sThis moves the WARP identity (and its exit IP), not your settings —%s\n' "$C_GRAY" "$C_RESET"
+    printf ' %ssettings travel as a preset.%s\n\n' "$C_GRAY" "$C_RESET"
     read -rp " Path to wgcf-account.toml: " f
     [[ -n "$f" ]] || { echo " Cancelled."; pause; return; }
     if warp_import_account "$f"; then engine_apply; fi
     pause
 }
 
-menu_manage() {
+# =========================================================================
+# Automation
+# =========================================================================
+menu_autorestart() {
     while true; do
         banner
-        status_line
+        printf '\n %sAuto Restart%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf ' Restarts WARP and the engine on a schedule, so a tunnel that has\n'
+        printf ' slowly gone stale fixes itself without anyone watching.\n\n'
+        if autorestart_is_enabled; then
+            printf '   Status    %s● on%s\n' "$C_GREEN" "$C_RESET"
+        else
+            printf '   Status    %s○ off%s\n' "$C_GRAY" "$C_RESET"
+        fi
+        printf '   Every     %s hours\n' "$(autorestart_interval)"
+        printf '   Next run  %s\n' "$(autorestart_next_run)"
+        printf '\n %sThe redirect rules come down first, so traffic flows directly%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %sduring the restart instead of into a half-stopped engine.%s\n' "$C_GRAY" "$C_RESET"
+        printf '\n   %st%s  Turn %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(autorestart_is_enabled && echo off || echo on)"
+        printf '   %si%s  Change the interval\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %sr%s  Run one now\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            t|T) if autorestart_is_enabled; then autorestart_disable; else autorestart_enable; fi
+                 autorestart_timer_setup
+                 printf '\n %sAuto restart is %s.%s\n' "$C_GREEN" "$(autorestart_is_enabled && echo on || echo off)" "$C_RESET"
+                 pause ;;
+            i|I) read -rp " Restart every how many hours? [1-168]: " h
+                 if autorestart_set_interval "$h"; then
+                     autorestart_timer_setup
+                     printf ' %sInterval set to %s hours.%s\n' "$C_GREEN" "$(autorestart_interval)" "$C_RESET"
+                 else
+                     printf ' %sEnter a whole number of hours between 1 and 168.%s\n' "$C_RED" "$C_RESET"
+                 fi
+                 pause ;;
+            r|R) printf '\n %sRestarting now...%s\n' "$C_GRAY" "$C_RESET"
+                 # same guard as the timer: tell the watchdog this gap is planned
+                 wm_maintenance_begin
+                 if warp_is_up; then warp_restart; fi
+                 engine_apply && printf ' %sDone.%s\n' "$C_GREEN" "$C_RESET" \
+                              || printf ' %sSomething failed — check Status.%s\n' "$C_RED" "$C_RESET"
+                 wm_maintenance_end
+                 pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_automation() {
+    while true; do
+        banner
+        printf '\n %sAutomation%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf '   %s1%s  Auto Restart  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+            "$(autorestart_is_enabled \
+                && printf '%s● on%s %severy %sh%s' "$C_GREEN" "$C_RESET" "$C_GRAY" "$(autorestart_interval)" "$C_RESET" \
+                || printf '%s○ off%s' "$C_GRAY" "$C_RESET")"
+        printf '   %s2%s  Refresh Routes\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp $'\n > ' ch
+        case "$ch" in
+            1) menu_autorestart ;;
+            2) apply_pretty ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# =========================================================================
+# Presets — carry one server's settings to the next
+# =========================================================================
+action_export_preset() {
+    # The code is encoded, not encrypted — anyone holding it can read it back. So
+    # the WARP+ key travels only when you say so, and a code without it is safe to
+    # paste anywhere.
+    local mode="" token
+    while true; do
+        token="$(preset_export_token "$mode")"
+        banner
+        printf '\n %sExport Preset%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        if [[ -z "$token" ]]; then
+            printf ' %sCould not build the preset code.%s\n' "$C_RED" "$C_RESET"
+            pause; return
+        fi
+        printf ' %sThis code carries everything you picked on this server:%s\n\n' "$C_GRAY" "$C_RESET"
+        printf '   Services       %s\n' "$(grep -cvE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null || echo 0)"
+        printf '   Custom domains %s\n' "$(grep -cvE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE" 2>/dev/null || echo 0)"
+        printf '   White list     %s\n' "$(grep -cvE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST" 2>/dev/null || echo 0)"
+        printf '   Settings       QUIC, ad blocker, auto IP health, auto restart\n'
+        if ! preset_has_license; then
+            printf '   WARP+ license  %s(none set on this server)%s\n' "$C_DIM" "$C_RESET"
+        elif [[ "$mode" == nolicense ]]; then
+            printf '   WARP+ license  %snot included%s\n' "$C_GRAY" "$C_RESET"
+        else
+            printf '   WARP+ license  %sincluded%s\n' "$C_YELLOW" "$C_RESET"
+        fi
+        echo; hr
+        printf '%s%s%s\n' "$C_WHITE" "$token" "$C_RESET"
+        hr
+        printf '\n %sCopy the whole code and paste it into Import Preset on your other%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %sservers — they end up with exactly these services enabled.%s\n' "$C_GRAY" "$C_RESET"
+        if preset_has_license && [[ "$mode" != nolicense ]]; then
+            printf '\n %sThe code is encoded, not encrypted: whoever has it can read the%s\n' "$C_YELLOW" "$C_RESET"
+            printf ' %sWARP+ key out of it. Treat it like a password, or press l.%s\n' "$C_YELLOW" "$C_RESET"
+        fi
+        printf '\n   %ss%s  also save it to a file\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        if preset_has_license; then
+            printf '   %sl%s  %s the WARP+ license\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+                "$([[ "$mode" == nolicense ]] && echo include || echo 'leave out')"
+        fi
+        printf '   %s0%s  Back\n\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            l|L) [[ "$mode" == nolicense ]] && mode="" || mode="nolicense" ;;
+            s|S) local def dest; def="$(preset_default_path)"
+                 read -rp " Save to [${def}]: " dest
+                 [[ -z "$dest" ]] && dest="$def"
+                 if preset_export_to "$dest" "$mode"; then
+                     printf ' %sSaved to %s%s\n' "$C_GREEN" "$dest" "$C_RESET"
+                 else
+                     printf ' %sCould not write %s.%s\n' "$C_RED" "$dest" "$C_RESET"
+                 fi
+                 pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+action_import_preset() {
+    banner
+    printf '\n %sImport Preset%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+    printf ' %sPaste the code from another server (a file path also works).%s\n' "$C_GRAY" "$C_RESET"
+    printf ' %sThis replaces the selected services, custom domains and white list%s\n' "$C_GRAY" "$C_RESET"
+    printf ' %son this server with exactly what the code says.%s\n\n' "$C_GRAY" "$C_RESET"
+    read -rp " Code or path: " src
+    [[ -n "$src" ]] || { echo " Cancelled."; pause; return; }
+
+    local f
+    if ! f="$(preset_resolve "$src")"; then
+        printf '\n %sThat is not a valid preset code or file.%s\n' "$C_RED" "$C_RESET"
+        printf ' %sA code starts with WMP1. — make sure the whole thing was pasted.%s\n' "$C_GRAY" "$C_RESET"
+        pause; return
+    fi
+    printf '\n %sThe preset contains:%s\n' "$C_WHITE" "$C_RESET"
+    preset_summary "$f"
+    read -rp $'\n Apply it? [y/N]: ' yn
+    if [[ ! "$yn" =~ ^[Yy]$ ]]; then preset_release "$f" "$src"; echo " Cancelled."; pause; return; fi
+
+    local ok=0
+    preset_import_payload "$f" && ok=1
+    preset_release "$f" "$src"
+    if [[ "$ok" -eq 1 ]]; then
+        printf '\n %sImported. Applying...%s\n\n' "$C_GREEN" "$C_RESET"
+        # settings from the preset only take effect once the engine is rebuilt
+        adblock_timer_setup; ipcheck_timer_setup; autorestart_timer_setup
+        if engine_apply; then printf ' %sApplied — this server now matches the preset.%s\n' "$C_GREEN" "$C_RESET"
+        else printf ' %sImported, but the engine did not come back — check Status.%s\n' "$C_RED" "$C_RESET"; fi
+    else
+        printf '\n %sImport failed.%s\n' "$C_RED" "$C_RESET"
+    fi
+    pause
+}
+
+menu_presets() {
+    while true; do
+        banner
+        printf '\n %sPresets%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf ' %sSet one server up the way you want it, then carry it to the rest.%s\n\n' "$C_GRAY" "$C_RESET"
+        printf '   %s1%s  Export Preset\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s2%s  Import Preset\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s3%s  Import WARP Account  %s(when registration is 429-limited)%s\n' \
+            "$C_PRIMARY$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET"
+        printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp $'\n > ' ch
+        case "$ch" in
+            1) action_export_preset ;;
+            2) action_import_preset ;;
+            3) action_import_account ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# =========================================================================
+# WARP submenu — everything that is about the tunnel itself
+# =========================================================================
+menu_connection() {
+    while true; do
+        banner
+        printf '\n %sConnection%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
         printf '   %s1%s  Change IP\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s2%s  Auto IP Health  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
             "$(ipcheck_is_enabled && printf '%s● on%s' "$C_GREEN" "$C_RESET" || printf '%s○ off%s' "$C_GRAY" "$C_RESET")"
-        printf '   %s3%s  QUIC handling  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+        printf '   %s3%s  QUIC Handling  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
             "$([[ "$(routing_quic_mode)" == light ]] && printf '%slight%s' "$C_GREEN" "$C_RESET" || printf '%sroute%s' "$C_GRAY" "$C_RESET")"
-        printf '   %s4%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s5%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s6%s  Restart\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-        printf '   %s7%s  Import Account\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         read -rp $'\n > ' ch
         case "$ch" in
             1) action_change_ip ;;
             2) menu_ipcheck ;;
             3) menu_quic ;;
-            4) menu_license ;;
-            5) action_status ;;
-            6) action_restart ;;
-            7) action_import ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_warp() {
+    while true; do
+        banner
+        status_line
+        printf '   %s1%s  Choose Services\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s2%s  Custom Domains\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s3%s  White Lists\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s4%s  Connection\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s5%s  Automation\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s6%s  Presets\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s7%s  WARP+ License\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s8%s  Status\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s9%s  Restart WARP\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp $'\n > ' ch
+        case "$ch" in
+            1) menu_services ;;
+            2) menu_custom_domains ;;
+            3) menu_whitelist ;;
+            4) menu_connection ;;
+            5) menu_automation ;;
+            6) menu_presets ;;
+            7) menu_license ;;
+            8) action_status ;;
+            9) action_restart_warp ;;
             0|"") return ;;
         esac
     done
@@ -708,10 +948,12 @@ purge_everything() {
     systemctl disable --now "$WM_WATCHDOG_TIMER" >/dev/null 2>&1 || true
     systemctl disable --now "$WM_ADBLOCK_TIMER" >/dev/null 2>&1 || true
     systemctl disable --now "$WM_IPCHECK_TIMER" >/dev/null 2>&1 || true
+    systemctl disable --now "$WM_AUTORESTART_TIMER" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/${WM_SINGBOX_SERVICE}" /etc/systemd/system/warp-manager-boot.service \
           "/etc/systemd/system/${WM_WATCHDOG_SERVICE}" "/etc/systemd/system/${WM_WATCHDOG_TIMER}" \
           "/etc/systemd/system/${WM_ADBLOCK_SERVICE}" "/etc/systemd/system/${WM_ADBLOCK_TIMER}" \
-          "/etc/systemd/system/${WM_IPCHECK_SERVICE}" "/etc/systemd/system/${WM_IPCHECK_TIMER}"
+          "/etc/systemd/system/${WM_IPCHECK_SERVICE}" "/etc/systemd/system/${WM_IPCHECK_TIMER}" \
+          "/etc/systemd/system/${WM_AUTORESTART_SERVICE}" "/etc/systemd/system/${WM_AUTORESTART_TIMER}"
     routing_teardown 2>/dev/null || true
     warp_down 2>/dev/null || true
     systemctl disable --now "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
@@ -737,6 +979,18 @@ case "${1:-}" in
     --watchdog)  watchdog_run; exit 0 ;;
     --adblock-update) require_root; adblock_refresh; exit $? ;;
     --ip-check)  require_root; ipcheck_run; exit 0 ;;
+    --auto-restart) require_root; autorestart_run; exit 0 ;;
+    # no FILE: print the token on stdout, so it pipes straight into another server:
+    #   ssh b "warp-manager --import-preset $(ssh a warp-manager --export-preset)"
+    --export-preset)
+        require_root
+        case "${2:-}" in
+            "")            preset_export_token ;;
+            --no-license)  preset_export_token nolicense ;;
+            *)             preset_export_to "$2" "${3:-}" && echo "$2" ;;
+        esac
+        exit $? ;;
+    --import-preset) require_root; preset_import "${2:-}" && { adblock_timer_setup; ipcheck_timer_setup; autorestart_timer_setup; engine_apply; }; exit $? ;;
     --update)    require_root; exec bash -c "$(curl -fsSL --connect-timeout 20 "$WM_UPDATE_URL")" ;;
     --purge)     require_root; purge_everything; exit 0 ;;
     -h|--help)
@@ -752,6 +1006,11 @@ WARP Manager
   warp-manager --license KEY  apply a WARP+ license
   warp-manager --adblock-update  refresh the ad blocker list now
   warp-manager --ip-check     check the WARP exit IP now (rotates it if bad)
+  warp-manager --auto-restart run the scheduled restart now (no-op when disabled)
+  warp-manager --export-preset        print this server's preset code
+  warp-manager --export-preset --no-license   ...without the WARP+ key
+  warp-manager --export-preset FILE   write the preset to a file instead
+  warp-manager --import-preset CODE|FILE  apply a preset and restart the engine
   warp-manager --update       update to the latest version (keeps your config)
   warp-manager --purge        remove everything
 EOF
@@ -767,25 +1026,22 @@ ensure_dirs
 while true; do
     banner
     status_line
-    printf '   %s1%s  Choose Services\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s2%s  Custom Domains\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s3%s  Ad Blocker %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
-        "$(adblock_is_enabled && printf '%s● on%s' "$C_GREEN" "$C_RESET" || printf '%s○ off%s' "$C_GRAY" "$C_RESET")"
-    printf '   %s4%s  Refresh Routes\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s5%s  Manage\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s6%s  Update\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s7%s  Uninstall\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    printf '   %s8%s  Exit\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s1%s  WARP %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+        "$(warp_is_up && printf '%s● ON%s' "$C_GREEN" "$C_RESET" || printf '%s○ OFF%s' "$C_RED" "$C_RESET")"
+    printf '   %s2%s  Ad Blocker %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+        "$(adblock_is_enabled && printf '%s● ON%s' "$C_GREEN" "$C_RESET" || printf '%s○ OFF%s' "$C_GRAY" "$C_RESET")"
+    printf '   %s3%s  Restart All Services\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s4%s  Update\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s5%s  Uninstall\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+    printf '   %s6%s  Exit\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
     read -rp $'\n > ' choice
     case "$choice" in
-        1) menu_services ;;
-        2) menu_custom_domains ;;
-        3) menu_adblock ;;
-        4) apply_pretty ;;
-        5) menu_manage ;;
-        6) action_update ;;
-        7) action_uninstall ;;
-        8|q|Q|0) clear 2>/dev/null || true; exit 0 ;;
+        1) menu_warp ;;
+        2) menu_adblock ;;
+        3) action_restart_all ;;
+        4) action_update ;;
+        5) action_uninstall ;;
+        6|q|Q|0) clear 2>/dev/null || true; exit 0 ;;
         *) ;;
     esac
 done

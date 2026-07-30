@@ -10,7 +10,7 @@ export WM_ROOT
 
 # load libraries (functions); runtime data paths point at /opt after the copy step
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock ipcheck singbox; do source "${SRC_DIR}/lib/${lib}.sh"; done
+for lib in common warp routing providers adblock ipcheck singbox automation presets; do source "${SRC_DIR}/lib/${lib}.sh"; done
 require_root
 
 INSTALL_LOG="/tmp/warp-manager-install.log"
@@ -110,6 +110,8 @@ step_generate() {
     adblock_timer_setup
     # exit-IP health check units; the timer likewise only runs when enabled
     ipcheck_timer_setup
+    # scheduled restart units; off by default, the timer only runs when enabled
+    autorestart_timer_setup
     # re-apply the engine automatically on every boot (nft rules aren't persistent)
     install -m 644 "${SRC_DIR}/systemd/warp-manager-boot.service" /etc/systemd/system/warp-manager-boot.service
     systemctl daemon-reload
@@ -142,7 +144,7 @@ else
     printf '%s  Installed, but WARP is not connected yet.%s\n' "$C_BOLD$C_YELLOW" "$C_RESET"
     printf '  Cloudflare rate-limited registration (429) from this server, OR it needs a moment.\n\n'
     printf '  %sFinish it one of these ways:%s\n' "$C_BOLD" "$C_RESET"
-    printf '   • wait a few minutes, then:  %ssudo wm%s → Manage → Restart\n' "$C_WHITE" "$C_RESET"
+    printf '   • wait a few minutes, then:  %ssudo wm%s → Restart All Services\n' "$C_WHITE" "$C_RESET"
     printf '   • or import an account from one of your working servers:\n'
     printf '       copy  %s/var/lib/warp-manager/wgcf/wgcf-account.toml%s  from a working server, then:\n' "$C_WHITE" "$C_RESET"
     printf '       %ssudo warp-manager --import-account /path/to/wgcf-account.toml%s\n\n' "$C_WHITE" "$C_RESET"
