@@ -392,16 +392,140 @@ warp_location() {
     [[ -n "$org"  ]] && printf 'Network:     %s\n' "$org"
 }
 
-# Register a fresh WARP account -> new exit IP. Re-applies a stored license if any.
+# --- changing the exit IP ------------------------------------------------
+# Registering a new account changes who Cloudflare thinks you are, but NOT where
+# you come out: the free-WARP egress is drawn from a pool tied to the edge you
+# connect to, so a fresh account very often lands on the exact same address —
+# which is why "Change IP" could hand back the IP it had just replaced.
+#
+# The entry point is the lever that actually moves you: Cloudflare announces WARP
+# on several anycast prefixes and a long list of ports, and a different one can put
+# you on a different edge and pool. So a rotation registers once and then walks a
+# few endpoints, keeping the first that BOTH completes a handshake AND reports a
+# different exit IP. Every candidate is verified before it is kept, so a dead
+# endpoint can never be left behind on a production tunnel.
+WM_WARP_ENDPOINT_PREFIXES="162.159.192 162.159.193 162.159.195 188.114.96 188.114.97 188.114.98 188.114.99"
+WM_WARP_ENDPOINT_PORTS="2408 500 854 859 864 878 880 890 891 894 903 908 928 934 939 942 943 945 946 955 968 987 988 1002 1010 1014 1018 1070 1074 1180 1387 1701 1843 2371 2506 3138 3476 3581 3854 4177 4198 4233 4500 5279 5956 7103 7152 7156 7281 7559 8319 8742 8854 8886"
+WM_WARP_ROTATE_TRIES="${WM_WARP_ROTATE_TRIES:-6}"
+WM_WARP_HANDSHAKE_WAIT="${WM_WARP_HANDSHAKE_WAIT:-8}"
+
+# <n> — the first candidate keeps the .1 host, which is always live, so a rotation
+# has a reliable baseline before it starts exploring the rest of the prefix.
+_warp_candidate_endpoint() {
+    local n="${1:-2}"
+    local -a pfx ports
+    read -ra pfx   <<<"$WM_WARP_ENDPOINT_PREFIXES"
+    read -ra ports <<<"$WM_WARP_ENDPOINT_PORTS"
+    local host=1
+    (( n > 1 )) && host=$(( RANDOM % 254 + 1 ))
+    printf '%s.%s:%s' "${pfx[RANDOM % ${#pfx[@]}]}" "$host" "${ports[RANDOM % ${#ports[@]}]}"
+}
+
+# The exit address alone, no formatting — used to compare before/after.
+_warp_exit_ip_only() {
+    curl -s --interface "$(_warp_bind_addr)" --connect-timeout 4 --max-time 8 \
+        "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}'
+}
+
+# Bring the tunnel up on one endpoint and echo the exit IP it yields.
+# Non-zero (and no output) when that endpoint never handshakes.
+_warp_try_endpoint() {
+    local ep="$1" n=0
+    conf_set warp_endpoint "$ep"
+    warp_write_conf >/dev/null 2>&1 || return 1
+    systemctl restart "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || return 1
+    _warp_conf_stamp
+    while (( n++ < WM_WARP_HANDSHAKE_WAIT )); do
+        warp_is_healthy && break
+        sleep 1
+    done
+    warp_is_healthy || return 1
+    _warp_exit_ip_only
+}
+
+# Set for the caller to report honestly instead of announcing a change that may
+# not have happened.
+WARP_OLD_IP=""
+WARP_NEW_IP=""
+
+# Returns 0 when the tunnel is healthy afterwards (whether or not the IP moved),
+# 1 when it could not be brought back at all. Compare WARP_OLD_IP/WARP_NEW_IP to
+# tell the two apart.
 warp_change_ip() {
     require_root
+    local old_ep bkp i ep new_ip last_ok="" had_rules=0
+    WARP_OLD_IP="$(_warp_exit_ip_only)"
+    WARP_NEW_IP=""
+    old_ep="$(conf_get warp_endpoint)"
+
+    # This deliberately flaps the tunnel several times. Traffic aimed at a
+    # half-up WARP would black-hole, so take the divert rules out of the path
+    # first — everything simply flows direct while we work.
+    if command -v routing_installed >/dev/null 2>&1 && routing_installed; then
+        had_rules=1; routing_teardown >/dev/null 2>&1
+    fi
+    wm_maintenance_begin
+
+    # A 429 halfway through must not leave this server with no WARP identity at
+    # all, so the current account is kept until a new one is really in hand.
+    bkp="$(mktemp -d)"
+    cp -f "$WM_WGCF_DIR/wgcf-account.toml" "$bkp/" 2>/dev/null || true
+    cp -f "$WM_WGCF_DIR/wgcf-profile.conf" "$bkp/" 2>/dev/null || true
+
+    _warp_change_ip_restore() {
+        cp -f "$bkp/wgcf-account.toml" "$WM_WGCF_DIR/" 2>/dev/null || true
+        cp -f "$bkp/wgcf-profile.conf" "$WM_WGCF_DIR/" 2>/dev/null || true
+        conf_set warp_endpoint "$old_ep"
+        warp_up >/dev/null 2>&1 || true
+    }
+    _warp_change_ip_finish() {
+        rm -rf "$bkp"
+        unset -f _warp_change_ip_restore _warp_change_ip_finish
+        [[ "$had_rules" -eq 1 ]] && routing_apply >/dev/null 2>&1
+        wm_maintenance_end
+    }
+
     log_step "Creating a new WARP account (changing IP)..."
     rm -f "$WM_WGCF_DIR/wgcf-account.toml" "$WM_WGCF_DIR/wgcf-profile.conf"
-    warp_register || { log_error "Registration failed (rate-limited?). Keeping previous account if any."; return 1; }
+    if ! warp_register; then
+        log_error "Registration failed (rate-limited?). Restoring the previous account."
+        _warp_change_ip_restore
+        WARP_NEW_IP="$(_warp_exit_ip_only)"
+        _warp_change_ip_finish
+        return 1
+    fi
     local lic; lic="$(conf_get license_key)"
-    [[ -n "$lic" ]] && warp_apply_license "$lic"
-    warp_up                     # regenerates the wg config itself (warp_ensure_config)
-    log_info "New WARP IP: $(warp_trace_ip)"
+    [[ -n "$lic" ]] && warp_apply_license "$lic" >/dev/null 2>&1
+
+    for (( i = 1; i <= WM_WARP_ROTATE_TRIES; i++ )); do
+        ep="$(_warp_candidate_endpoint "$i")"
+        log_step "  trying WARP endpoint ${ep}..."
+        new_ip="$(_warp_try_endpoint "$ep")" || { log_warn "  ${ep} did not handshake."; continue; }
+        [[ -z "$new_ip" ]] && continue
+        last_ok="$ep"; WARP_NEW_IP="$new_ip"
+        if [[ -z "$WARP_OLD_IP" || "$new_ip" != "$WARP_OLD_IP" ]]; then
+            warp_trace_ip >/dev/null 2>&1      # refresh the cached header value
+            _warp_change_ip_finish
+            log_info "New WARP IP: ${new_ip} (was ${WARP_OLD_IP:-unknown}) via ${ep}."
+            return 0
+        fi
+        log_warn "  ${ep} still exits as ${new_ip}; trying another endpoint."
+    done
+
+    if [[ -n "$last_ok" ]]; then
+        # The tunnel is fine on a new account — Cloudflare just kept this server on
+        # the same edge. Say so rather than claiming a change that did not happen.
+        warp_trace_ip >/dev/null 2>&1
+        _warp_change_ip_finish
+        log_warn "Cloudflare returned the same exit IP (${WARP_OLD_IP}) on every endpoint tried."
+        return 0
+    fi
+
+    log_error "No WARP endpoint completed a handshake; restoring the previous settings."
+    _warp_change_ip_restore
+    WARP_NEW_IP="$(_warp_exit_ip_only)"
+    _warp_change_ip_finish
+    return 1
 }
 
 # Apply a WARP+ license key to the current account.

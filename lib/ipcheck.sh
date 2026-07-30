@@ -136,10 +136,18 @@ ipcheck_run() {
         singbox_reload >/dev/null 2>&1 || true
         wm_maintenance_end
         _ipcheck_trace
-        log_info "ip-check: new WARP exit ${IPCHECK_IP:-unknown} (${IPCHECK_LOC:-?})."
+        # warp_change_ip succeeds whenever the tunnel is healthy afterwards, which
+        # includes "Cloudflare handed back the same address". Log which one it was,
+        # so a server stuck on one exit is visible in the journal instead of looking
+        # like a rotation that worked.
+        if [[ -n "$WARP_OLD_IP" && "${IPCHECK_IP:-}" == "$WARP_OLD_IP" ]]; then
+            log_warn "ip-check: still on ${IPCHECK_IP} (${IPCHECK_LOC:-?}) — Cloudflare returned the same exit."
+        else
+            log_info "ip-check: new WARP exit ${IPCHECK_IP:-unknown} (${IPCHECK_LOC:-?})."
+        fi
     else
         wm_maintenance_end
-        log_error "ip-check: could not get a new IP (rate-limited?); keeping the current account."
+        log_error "ip-check: could not get a new IP (rate-limited?); the previous account is back."
     fi
     return 0
 }

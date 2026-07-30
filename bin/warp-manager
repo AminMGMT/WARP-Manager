@@ -493,11 +493,30 @@ menu_adblock() {
 action_change_ip() {
     banner
     printf '\n %sChange IP%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
-    printf ' Current IP: %s\n' "$(warp_trace_ip)"
-    read -rp $' Get a new WARP IP? [y/N]: ' yn
+    printf ' Current IP: %s\n\n' "$(warp_trace_ip)"
+    printf ' %sRegisters a new WARP account and walks a few Cloudflare entry points,%s\n' "$C_GRAY" "$C_RESET"
+    printf ' %skeeping the first one that is alive and gives a different exit.%s\n' "$C_GRAY" "$C_RESET"
+    printf ' %sSelected services flow directly while this runs (about a minute).%s\n' "$C_GRAY" "$C_RESET"
+    read -rp $'\n Get a new WARP IP? [y/N]: ' yn
     [[ "$yn" =~ ^[Yy]$ ]] || { echo " Cancelled."; pause; return; }
-    warp_change_ip
-    singbox_reload
+    echo
+    local rc=0
+    warp_change_ip || rc=$?
+    singbox_reload >/dev/null 2>&1 || true
+    echo
+    if [[ "$rc" -ne 0 ]]; then
+        printf ' %sCould not change the IP — the previous account and endpoint are back.%s\n' "$C_RED" "$C_RESET"
+    elif [[ -n "$WARP_OLD_IP" && "$WARP_NEW_IP" == "$WARP_OLD_IP" ]]; then
+        # Say it plainly instead of reporting a change that did not happen.
+        printf ' %sStill %s.%s\n' "$C_YELLOW" "$WARP_NEW_IP" "$C_RESET"
+        printf ' %sThe account is new and the tunnel is healthy, but Cloudflare put this%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %sserver back on the same edge. Free WARP draws the exit from a pool tied%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %sto the nearest datacenter, so a small pool can return the same address.%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %sTrying again may help; a WARP+ license widens the pool.%s\n' "$C_GRAY" "$C_RESET"
+    else
+        printf ' %sNew IP: %s%s   %s(was %s)%s\n' \
+            "$C_GREEN" "$WARP_NEW_IP" "$C_RESET" "$C_GRAY" "${WARP_OLD_IP:-unknown}" "$C_RESET"
+    fi
     echo; warp_location | sed 's/^/   /'
     pause
 }
