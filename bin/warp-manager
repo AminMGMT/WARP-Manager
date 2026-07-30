@@ -51,71 +51,261 @@ status_line() {
 }
 
 # =========================================================================
-# Groups   (data/groups.conf: GroupName|Display:id|Display:id|...)
+# Catalogue   (data/groups.conf: [Category] followed by one provider id per line)
 # =========================================================================
-group_names() { awk -F'|' '!/^#/ && NF>1 {print $1}' "$WM_GROUPS_FILE"; }
-# members of group N -> lines "Display<TAB>id"
-group_members() {
-    awk -F'|' -v n="$1" '!/^#/ && NF>1 { c++; if (c==n) { for(i=2;i<=NF;i++){ split($i,a,":"); print a[2]"\t"a[1] } } }' "$WM_GROUPS_FILE"
-}
-# all "id<TAB>Display" pairs across every group (for pretty apply naming)
-all_pairs() {
-    awk -F'|' '!/^#/ && NF>1 { for(i=2;i<=NF;i++){ split($i,a,":"); print a[2]"\t"a[1] } }' "$WM_GROUPS_FILE"
-}
-display_name() { all_pairs | awk -F'\t' -v id="$1" '$1==id{print $2; exit}'; }
+group_names() { awk '/^\[.*\]$/ { gsub(/^\[|\]$/,""); print }' "$WM_GROUPS_FILE"; }
 
-# ON if all members enabled, off if none, PARTIAL otherwise
+# ids of category N, in file order
+group_members() {
+    awk -v n="$1" '
+        /^[[:space:]]*(#|$)/ { next }
+        /^\[.*\]$/           { c++; next }
+        c == n               { print $1 }
+    ' "$WM_GROUPS_FILE"
+}
+# every id in the catalogue, once
+all_ids() {
+    awk '/^[[:space:]]*(#|$)|^\[.*\]$/ { next } { print $1 }' "$WM_GROUPS_FILE" | awk '!seen[$0]++'
+}
+# a service's label: the provider file is the single source of truth
+display_name() {
+    local n; n="$(prov_field "$1" name 2>/dev/null)"
+    printf '%s' "${n:-$1}"
+}
+
+# --- enabled-state cache -------------------------------------------------
+# The catalogue is ~100 services and every redraw asks the state of each one.
+# Grepping enabled.list that many times is visibly slow on a small VPS, so the
+# menu keeps the list in memory and writes it back in one go after a change.
+declare -A WM_EN=()
+sel_load() {
+    WM_EN=()
+    local id
+    while read -r id; do
+        [[ -n "$id" ]] && WM_EN["$id"]=1
+    done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
+}
+sel_save() {
+    local id tmp="${WM_ENABLED_FILE}.tmp"
+    : >"$tmp"
+    for id in "${!WM_EN[@]}"; do printf '%s\n' "$id"; done | sort >"$tmp"
+    mv -f "$tmp" "$WM_ENABLED_FILE"
+}
+sel_on()     { [[ -n "${WM_EN[$1]:-}" ]]; }
+sel_set()    { WM_EN["$1"]=1; }
+sel_unset()  { unset 'WM_EN[$1]'; }
+sel_toggle() { if sel_on "$1"; then sel_unset "$1"; else sel_set "$1"; fi; }
+
+# ON if every member is selected, off if none, PARTIAL in between
 group_state() {
     local n="$1" total=0 on=0 id
-    while IFS=$'\t' read -r id _; do
+    while read -r id; do
         [[ -z "$id" ]] && continue
-        total=$((total+1)); provider_is_enabled "$id" && on=$((on+1))
+        total=$((total+1)); sel_on "$id" && on=$((on+1))
     done < <(group_members "$n")
-    if   [[ "$on" -eq 0 ]]; then echo off
+    if   [[ "$total" -eq 0 || "$on" -eq 0 ]]; then echo off
     elif [[ "$on" -eq "$total" ]]; then echo on
     else echo partial; fi
 }
-group_toggle() {
-    local n="$1" id st; st="$(group_state "$n")"
-    while IFS=$'\t' read -r id _; do
+group_count() {   # "<on>/<total>"
+    local n="$1" total=0 on=0 id
+    while read -r id; do
         [[ -z "$id" ]] && continue
-        if [[ "$st" == on ]]; then provider_disable "$id"; else provider_enable "$id"; fi
+        total=$((total+1)); sel_on "$id" && on=$((on+1))
+    done < <(group_members "$n")
+    printf '%s/%s' "$on" "$total"
+}
+group_set_all() {   # <n> on|off
+    local n="$1" want="$2" id
+    while read -r id; do
+        [[ -z "$id" ]] && continue
+        [[ "$want" == on ]] && sel_set "$id" || sel_unset "$id"
     done < <(group_members "$n")
 }
 
+# --- small UI helpers ----------------------------------------------------
+mark_of() {
+    case "$1" in
+        on)      printf '%s●%s' "$C_GREEN"  "$C_RESET" ;;
+        partial) printf '%s◐%s' "$C_YELLOW" "$C_RESET" ;;
+        *)       printf '%s○%s' "$C_GRAY"   "$C_RESET" ;;
+    esac
+}
+
+# Turn "1 4 7", "1,4,7" and "2-9" into one valid index per line.
+parse_nums() {
+    local raw="${1//,/ }" max="$2" tok a b i
+    for tok in $raw; do
+        if [[ "$tok" =~ ^[0-9]+$ ]]; then
+            (( tok >= 1 && tok <= max )) && printf '%s\n' "$tok"
+        elif [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
+            (( a > b )) && { i="$a"; a="$b"; b="$i"; }
+            for (( i = a; i <= b; i++ )); do
+                (( i >= 1 && i <= max )) && printf '%s\n' "$i"
+            done
+        fi
+    done
+}
+
+# What is currently routed, grouped by category and wrapped. Reads the file, not
+# the menu cache, so it is also correct outside the Choose Services screen. With a
+# large catalogue selected, one line per service would fill the whole screen.
+enabled_summary() {
+    local -a gnames
+    mapfile -t gnames < <(group_names)
+    local i=0 g id names any=0
+    declare -A listed=()
+    for g in "${gnames[@]}"; do
+        i=$((i+1)); names=""
+        while read -r id; do
+            [[ -z "$id" ]] && continue
+            [[ -f "$WM_PROVIDERS_DIR/${id}.conf" ]] || continue
+            provider_is_enabled "$id" || continue
+            listed["$id"]=1
+            names+="${names:+, }$(display_name "$id")"
+        done < <(group_members "$i")
+        [[ -z "$names" ]] && continue
+        any=1
+        if [[ "$(group_members "$i" | wc -l)" -eq 1 ]]; then
+            printf '   %s%s%s\n' "$C_WHITE" "$g" "$C_RESET"
+        else
+            printf '   %s%s%s\n' "$C_WHITE" "$g" "$C_RESET"
+            printf '%s\n' "$names" | fold -s -w 66 | sed "s/^/     ${C_GRAY}/;s/\$/${C_RESET}/"
+        fi
+    done
+    # anything enabled that no category claims (custom domains, a leftover id)
+    names=""
+    while read -r id; do
+        [[ -z "$id" || -n "${listed[$id]:-}" ]] && continue
+        [[ -f "$WM_PROVIDERS_DIR/${id}.conf" ]] || continue
+        names+="${names:+, }$(display_name "$id")"
+    done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
+    if [[ -n "$names" ]]; then
+        any=1
+        printf '   %sOther%s\n' "$C_WHITE" "$C_RESET"
+        printf '%s\n' "$names" | fold -s -w 66 | sed "s/^/     ${C_GRAY}/;s/\$/${C_RESET}/"
+    fi
+    [[ "$any" -eq 0 ]] && printf '   %s(nothing selected — everything keeps the server IP)%s\n' "$C_DIM" "$C_RESET"
+    return 0
+}
+
 # =========================================================================
-# Choose services
+# Choose services — categories, then the services inside one
 # =========================================================================
+# One category: numbered services, two columns when the list is long.
+menu_category() {
+    local n="$1" title="$2"
+    local -a ids names
+    mapfile -t ids < <(group_members "$n")
+    local id w=0 name
+    names=()
+    for id in "${ids[@]}"; do
+        name="$(display_name "$id")"
+        names+=("$name")
+        (( ${#name} > w )) && w=${#name}
+    done
+    local total=${#ids[@]}
+
+    while true; do
+        banner
+        printf '\n %s%s%s   %s%s selected%s\n\n' \
+            "$C_BOLD$C_PRIMARY" "$title" "$C_RESET" "$C_GRAY" "$(group_count "$n")" "$C_RESET"
+
+        # two columns once the list no longer fits comfortably on one screen
+        local cols=1 rows=$total
+        if (( total > 12 )); then cols=2; rows=$(( (total + 1) / 2 )); fi
+        local r c i label
+        for (( r = 0; r < rows; r++ )); do
+            printf ' '
+            for (( c = 0; c < cols; c++ )); do
+                i=$(( r + c * rows ))
+                (( i >= total )) && continue
+                # pad only while another column follows, so no line ends in blanks
+                if (( r + (c + 1) * rows < total )); then
+                    label="$(printf '%-*s' "$w" "${names[$i]}")"
+                else
+                    label="${names[$i]}"
+                fi
+                printf '  %s%2d%s %b %s%s%s' \
+                    "$C_PRIMARY$C_BOLD" "$(( i + 1 ))" "$C_RESET" \
+                    "$(sel_on "${ids[$i]}" && mark_of on || mark_of off)" \
+                    "$C_WHITE" "$label" "$C_RESET"
+            done
+            printf '\n'
+        done
+
+        printf '\n %sNumbers%s toggle  %s(3   1 4 7   2-9)%s\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_DIM" "$C_RESET"
+        printf ' %sa%s select all   %sn%s select none   %si%s invert   %s0%s back\n\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            0|"")  sel_save; return ;;
+            a|A)   group_set_all "$n" on ;;
+            n|N)   group_set_all "$n" off ;;
+            i|I)   for id in "${ids[@]}"; do sel_toggle "$id"; done ;;
+            *)     while read -r i; do sel_toggle "${ids[$(( i - 1 ))]}"; done \
+                       < <(parse_nums "$ch" "$total") ;;
+        esac
+        sel_save
+    done
+}
+
 menu_services() {
     local -a gnames
     mapfile -t gnames < <(group_names)
+    sel_load
     while true; do
         banner
-        printf '\n %sChoose Services%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
-        local i=0 g mark members mline
+        local total_on=0 total_all=0 id
+        while read -r id; do
+            total_all=$((total_all+1)); sel_on "$id" && total_on=$((total_on+1))
+        done < <(all_ids)
+        printf '\n %sChoose Services%s   %s%s of %s selected%s\n\n' \
+            "$C_BOLD$C_PRIMARY" "$C_RESET" "$C_GRAY" "$total_on" "$total_all" "$C_RESET"
+
+        local i=0 g st cnt single
         for g in "${gnames[@]}"; do
             i=$((i+1))
-            case "$(group_state "$i")" in
-                on)      mark="${C_GREEN}●${C_RESET}" ;;
-                partial) mark="${C_YELLOW}◐${C_RESET}" ;;
-                *)       mark="${C_GRAY}○${C_RESET}" ;;
-            esac
-            mline="$(group_members "$i" | awk -F'\t' '{printf (NR>1?", ":"")$2}')"
-            printf ' %s%d.%s %b %s%-13s%s %s[ %s ]%s\n' \
-                "$C_PRIMARY$C_BOLD" "$i" "$C_RESET" "$mark" "$C_WHITE" "$g" "$C_RESET" "$C_GRAY" "$mline" "$C_RESET"
+            st="$(group_state "$i")"
+            cnt="$(group_count "$i")"
+            single=0; [[ "${cnt#*/}" -eq 1 ]] && single=1
+            if [[ "$single" -eq 1 ]]; then
+                printf '  %s%2d%s %b %s%s%s\n' \
+                    "$C_PRIMARY$C_BOLD" "$i" "$C_RESET" "$(mark_of "$st")" "$C_WHITE" "$g" "$C_RESET"
+            else
+                printf '  %s%2d%s %b %s%s%s %s%s%s\n' \
+                    "$C_PRIMARY$C_BOLD" "$i" "$C_RESET" "$(mark_of "$st")" \
+                    "$C_WHITE" "$(printf '%-38s' "$g")" "$C_RESET" "$C_GRAY" "$cnt" "$C_RESET"
+            fi
         done
-        printf '\n %sNumber%s toggle group   %s0%s back & apply\n\n' "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+
+        printf '\n %sNumber%s open a category %s(single-service rows toggle directly)%s\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_DIM" "$C_RESET"
+        printf ' %sa%s select everything   %sn%s select nothing   %s0%s back & apply\n\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
         read -rp " > " ch
         case "$ch" in
-            0|"") apply_pretty; return ;;
+            0|"") sel_save; apply_pretty; return ;;
+            a|A)  while read -r id; do sel_set   "$id"; done < <(all_ids); sel_save ;;
+            n|N)  while read -r id; do sel_unset "$id"; done < <(all_ids); sel_save ;;
             *[!0-9]*) : ;;
-            *) [[ "$ch" -ge 1 && "$ch" -le ${#gnames[@]} ]] && group_toggle "$ch" ;;
+            *)
+                if [[ "$ch" -ge 1 && "$ch" -le ${#gnames[@]} ]]; then
+                    if [[ "$(group_count "$ch")" == */1 ]]; then
+                        # a one-service category is a plain switch, not a submenu
+                        sel_toggle "$(group_members "$ch" | head -n1)"; sel_save
+                    else
+                        menu_category "$ch" "${gnames[$(( ch - 1 ))]}"
+                    fi
+                fi ;;
         esac
     done
 }
 
 # =========================================================================
-# Apply — per-service Done/Failed, skip failures, load once
+# Apply — show what is routed, then bring the engine to that state
 # =========================================================================
 # Add any custom domains as an extra provider-like file so sing-box picks them up.
 _sync_custom_provider() {
@@ -151,14 +341,7 @@ apply_pretty() {
         warp_up || { printf ' %sWARP could not start (rate-limited?). Manage → Import Account.%s\n' "$C_RED" "$C_RESET"; pause; return; }
     fi
 
-    local id name
-    while read -r id; do
-        [[ -z "$id" ]] && continue
-        [[ -f "$WM_PROVIDERS_DIR/${id}.conf" ]] || continue
-        name="$(display_name "$id")"; [[ -z "$name" ]] && name="$(prov_field "$id" name)"
-        printf '   %-22s %sON%s\n' "$name" "$C_GREEN" "$C_RESET"
-    done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
-
+    enabled_summary
     echo
     _sync_custom_provider
     if singbox_reload; then
@@ -427,12 +610,7 @@ action_status() {
     warp_location | sed 's/^/   /'
     echo
     printf ' %sEnabled services%s\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
-    local any=0 id
-    while read -r id; do
-        [[ -z "$id" ]] && continue
-        printf '   • %s\n' "$(display_name "$id" 2>/dev/null || prov_field "$id" name)"; any=1
-    done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
-    [[ "$any" -eq 0 ]] && printf '   %s(none)%s\n' "$C_DIM" "$C_RESET"
+    enabled_summary
     pause
 }
 

@@ -43,7 +43,8 @@ Generating Profile         [################################] 100%
   WARP is Ready : sudo wm
 ```
 
-By default the **AI** group is enabled so Gemini/ChatGPT work right away.
+On a fresh install a small AI set is enabled (Google, ChatGPT, Claude, Grok,
+Perplexity, Copilot) so those work right away. Everything else is one menu away.
 
 ---
 
@@ -110,15 +111,27 @@ Menu:
  8. Exit
 ```
 
-- **1) Choose Services** — toggle whole groups on/off:
-  - **AI** [ Gemini & Google AI, ChatGPT, Grok, Perplexity, Copilot ]
-  - **Music** [ SoundCloud, Spotify, Apple Music, Tidal ]
-  - **Social Media** [ X, SnapChat, Reddit, TikTok, Instagram ]
-  - **Stream** [ Netflix, HBO, Twitch, Kick ]
-  - **Creative** [ Adobe, Shutterstock, PeakPX, Microsoft ]
+- **1) Choose Services** — a catalogue of ~100 services in 14 categories. Pick a
+  category number to open it, then toggle services inside:
 
-  On apply, each service shows `Done` (green) or `Failed` (red); a failed service is
-  skipped and the rest continue.
+  ```
+   Choose Services   21 of 105 selected
+
+     1 ◐ AI                                     17/20
+     2 ○ Music                                  0/11
+     3 ○ Social Media                           0/12
+    ...
+    11 ● All Google Services (Except YouTube)
+
+   Number open a category (single-service rows toggle directly)
+   a select everything   n select nothing   0 back & apply
+  ```
+
+  Inside a category, `a` selects everything, then type the numbers of the few you
+  do *not* want to switch them back off — `3`, `1 4 7` and `2-9` all work. `n`
+  clears the category, `i` inverts it, `0` goes back. Categories that hold a
+  single service (the *All Google / Adobe / Microsoft Services* rows) toggle
+  straight from the list instead of opening a submenu.
 - **2) Custom Domains** — add/remove any other domain.
 - **3) Ad Blocker** — block ads and trackers for everyone using the server, using the
   **AdGuard DNS filter** (~160k domains) plus sing-box's own ads rule-set. Off by
@@ -152,21 +165,47 @@ sudo warp-manager --purge        # remove everything
 
 ---
 
-## Groups & services
+## Categories & services
 
-Groups live in `data/groups.conf`; each service is a file in `data/providers/<id>.conf`.
+The catalogue lives in `data/groups.conf`; each service is a file in
+`data/providers/<id>.conf`.
 
-| Group        | Services                                               |
-|--------------|--------------------------------------------------------|
-| AI           | Gemini & Google AI, ChatGPT, Grok, Perplexity, Copilot |
-| Music        | SoundCloud, Spotify, Apple Music, Tidal                |
-| Social Media | X, SnapChat, Reddit, TikTok, Instagram                 |
-| Stream       | Netflix, HBO, Twitch, Kick                             |
-| Creative     | Adobe, Shutterstock, PeakPX, Microsoft                 |
+| Category | Services |
+|---|---|
+| AI | Bolt.new, ChatGPT & Sora, Claude, Copilot, Cursor, ElevenLabs, Gemini, Grok, Ideogram, Leonardo AI, Lovable, Midjourney, Perplexity, Poe, Replit AI, Runway, Suno, Synthesia, Udio, Windsurf |
+| Music | Amazon Music, Apple Music, Bandcamp, Deezer, Last.fm, Pandora, Qobuz, SoundCloud, Spotify, Tidal, YouTube Music |
+| Social Media | Bluesky, Facebook, Instagram, Mastodon, Pinterest, Reddit, SnapChat, Threads, TikTok, WeChat, WhatsApp, X |
+| Messaging | Discord, LINE, Signal, Telegram, WeChat, WhatsApp |
+| Streaming | Amazon Prime Video, Apple TV+, BBC iPlayer, Crunchyroll, Disney+, Discovery+, ESPN+, HBO Max, Hulu, Kick, Netflix, Paramount+, Peacock, Twitch |
+| Developer | Cloudflare Dashboard, Docker Hub, GitHub, GitLab, Hugging Face, Netlify, npm, Open VSX Registry, PyPI, Railway, Render, Vercel |
+| Gaming | Battle.net, EA App, Epic Games, Nintendo, PlayStation Network, Riot Games, Roblox, Steam, Ubisoft Connect, Xbox Network |
+| Cloud | Amazon Web Services (AWS), Cloudflare, DigitalOcean, Google Cloud Platform (GCP), Microsoft Azure |
+| Productivity | Airtable, Canva, Figma, Linear, Miro, Notion, Slack, Zoom |
+| Payment | PayPal, Revolut, Stripe, Wise |
+| All Google Services (Except YouTube) | — |
+| All Adobe Services | — |
+| All Microsoft Services | — |
+| Stock Images | Shutterstock, PeakPX |
 
-Add your own: drop a `data/providers/<id>.conf` and reference it in `data/groups.conf`.
-Provider types: `geosite` (a sing-box rule-set category, e.g. `category=openai`) or
-`domain` (a `domains=` list). sing-box matches these by domain at runtime.
+A service may appear in more than one category (WeChat and WhatsApp are both social
+and messaging apps) — it is one setting shown in two places.
+
+Add your own: drop a `data/providers/<id>.conf` and list its id under a category in
+`data/groups.conf`. Display names come from `name=` in the provider file, so they are
+never repeated in the catalogue. Provider types: `geosite` (a sing-box rule-set
+category, e.g. `category=openai`) or `domain` (a `domains=` list). sing-box matches
+these by domain at runtime.
+
+`priority=1` in a provider file lifts its domains above the always-direct carve-outs
+(YouTube, connectivity-check hosts). YouTube Music uses it so `music.youtube.com` can
+route while the rest of `*.youtube.com` stays direct — the audio itself streams from
+`googlevideo.com` and deliberately keeps going direct, so only the geo-checked
+app/API side rides on WARP.
+
+Deliberate exclusions, so selecting a service cannot break the server:
+`www.cloudflare.com` (the manager measures the server's own non-WARP connectivity
+against it), `amazonaws.com` (shared hosting for much of the internet), and Steam's
+game-download CDNs.
 
 ---
 

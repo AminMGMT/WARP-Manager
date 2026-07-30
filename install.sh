@@ -82,7 +82,8 @@ step_generate() {
     fi
     [[ -f "$WM_WGCF_DIR/wgcf-profile.conf" && -n "$(conf_get license_key)" ]] && warp_apply_license "$(conf_get license_key)"
 
-    # prune stale enabled entries; default-enable the AI group
+    # prune stale enabled entries; on a fresh install pick a small, useful default
+    # (the AI category alone is 20 services — enabling all of it would be a surprise)
     if [[ -s "$WM_ENABLED_FILE" ]]; then
         local kid
         while read -r kid; do [[ -f "$WM_PROVIDERS_DIR/$kid.conf" ]] && echo "$kid"; done <"$WM_ENABLED_FILE" \
@@ -91,7 +92,7 @@ step_generate() {
     fi
     if [[ ! -s "$WM_ENABLED_FILE" ]]; then
         local id
-        for id in google-ai openai grok perplexity copilot; do provider_enable "$id"; done
+        for id in google-ai openai claude grok perplexity copilot; do provider_enable "$id"; done
     fi
 
     # sing-box engine

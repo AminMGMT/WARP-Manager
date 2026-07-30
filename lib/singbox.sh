@@ -97,28 +97,38 @@ singbox_available_rulesets() {
 # --- generate the sing-box config from the enabled providers -------------
 singbox_write_config() {
     ensure_dirs
-    local geosf domsf id cat
-    geosf="$(mktemp)"; domsf="$(mktemp)"
+    local geosf domsf priof id cat
+    geosf="$(mktemp)"; domsf="$(mktemp)"; priof="$(mktemp)"
     while read -r id; do
         [[ -z "$id" ]] && continue
         [[ -f "$WM_PROVIDERS_DIR/${id}.conf" ]] || continue
         cat="$(prov_field "$id" category)"
         [[ -n "$cat" ]] && printf '%s\n' "$cat" >>"$geosf"
-        # split the space-separated domain list into one-per-line (shell-agnostic)
-        prov_field "$id" domains | tr ' ' '\n' >>"$domsf"
+        # split the space-separated domain list into one-per-line (shell-agnostic).
+        # priority=1 providers are matched ahead of the always-direct carve-outs
+        # below (that is the only way to route e.g. music.youtube.com while the
+        # rest of *.youtube.com stays direct).
+        if [[ "$(prov_field "$id" priority)" == "1" ]]; then
+            prov_field "$id" domains | tr ' ' '\n' >>"$priof"
+        else
+            prov_field "$id" domains | tr ' ' '\n' >>"$domsf"
+        fi
     done < <(grep -vE '^[[:space:]]*(#|$)' "$WM_ENABLED_FILE" 2>/dev/null)
 
     # keep only the categories we have a local rule-set for (see above)
     local avail; avail="$(singbox_available_rulesets $(grep -vE '^[[:space:]]*$' "$geosf" | sort -u))"
     printf '%s\n' "$avail" >"$geosf"
 
-    local geos_json doms_json
+    local geos_json doms_json prio_json
     geos_json="$(grep -vE '^[[:space:]]*$' "$geosf" | sort -u | jq -R . | jq -s .)"
     doms_json="$(grep -vE '^[[:space:]]*$' "$domsf" | sort -u | jq -R . | jq -s .)"
+    prio_json="$(grep -vE '^[[:space:]]*$' "$priof" | sort -u | jq -R . | jq -s .)"
     [[ -z "$geos_json" ]] && geos_json='[]'
     [[ -z "$doms_json" ]] && doms_json='[]'
+    [[ -z "$prio_json" ]] && prio_json='[]'
     local ng nd; ng=$(grep -vcE '^[[:space:]]*$' "$geosf"); nd=$(grep -vcE '^[[:space:]]*$' "$domsf")
-    rm -f "$geosf" "$domsf"
+    nd=$(( nd + $(grep -vcE '^[[:space:]]*$' "$priof") ))
+    rm -f "$geosf" "$domsf" "$priof"
 
     # A tproxy inbound handles both TCP and UDP (QUIC), so sing-box can sniff the
     # SNI out of QUIC ClientHello too and route apps (not just browsers) via WARP.
@@ -154,6 +164,7 @@ singbox_write_config() {
     jq -n \
         --argjson geos "$geos_json" \
         --argjson domains "$doms_json" \
+        --argjson prio "$prio_json" \
         --argjson has_v6 "$has_v6" \
         --argjson ads "$ads" \
         --argjson allow "$allow_json" \
@@ -204,6 +215,16 @@ singbox_write_config() {
           #  - "www.google.com" stays on WARP: the Gemini app talks to it, and routing
           #    is per-domain, so it cannot be direct for /generate_204 and WARP for the
           #    app. Point clients at gstatic.com/generate_204 for a WARP-independent ping.
+          # Priority services (priority=1 in their provider file) are matched FIRST,
+          # ahead of the carve-outs, so a single domain can be lifted out of a broad
+          # direct rule — music.youtube.com riding over the ".youtube.com" carve-out
+          # is the reason this exists. Their QUIC is blocked the same way as any
+          # other selected service, so the app falls back to TCP.
+          ( if ($prio|length) > 0 then
+              ( if $net then [] else [ { network:"udp", domain: $prio, outbound:"block" } ] end )
+              + [ { domain: $prio, outbound:"warp" } ]
+            else [] end )
+          +
           [ { domain_suffix: [".youtube.com",".googlevideo.com",".ytimg.com",".ggpht.com",
                               ".gstatic.com",".msftconnecttest.com",".msftncsi.com"], outbound:"direct" },
             { domain: ["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtubei.googleapis.com",
@@ -211,7 +232,12 @@ singbox_write_config() {
                        "gstatic.com","www.gstatic.com","connectivitycheck.gstatic.com",
                        "www.apple.com","captive.apple.com",
                        "msftconnecttest.com","www.msftconnecttest.com","msftncsi.com","www.msftncsi.com",
-                       "detectportal.firefox.com"], outbound:"direct" } ]
+                       "detectportal.firefox.com",
+                       # the manager measures the server''s own (non-WARP) internet
+                       # against this URL, and the auto IP health check refuses to
+                       # rotate when that probe fails — it must never ride on WARP,
+                       # even when the Cloudflare service is selected.
+                       "www.cloudflare.com"], outbound:"direct" } ]
           +
           # Ad blocker. The allow list is matched BEFORE the block rule so a false
           # positive can always be undone from the menu, and blocking happens before
