@@ -1,3 +1,79 @@
+<p align="center">
+  <img src="img/cover.png" alt="WARP Manager" width="100%">
+</p>
+
+# WARP Manager
+
+**Selective Cloudflare WARP routing for Linux VPSs.**
+
+<p align="center">
+
+Route only the services you choose through Cloudflare WARP while everything else continues using your server's public IP.
+
+No Docker • Pure Bash • Zero changes to your tunnel or proxy configuration
+
+</p>
+
+Telegram: **@BlackProtocols**
+
+---
+
+## Features
+
+- Route only selected services through Cloudflare WARP
+- Keep all other traffic on the server's native IP
+- Domain-based routing using **TLS SNI** and **QUIC ClientHello**
+- 100+ built-in providers across multiple categories
+- Custom domains
+- Global ad blocker (AdGuard DNS Filter + sing-box rules)
+- Automatic WARP IP health monitoring
+- Automatic route refresh and scheduled restart
+- WARP+ license support
+- Import / Export presets
+- Interactive CLI
+- Fail-open protection
+- HTTP/3 (QUIC) support
+- Pure Bash
+- No Docker
+- No changes to Xray, Marzban, Hiddify, OpenVPN, WireGuard or your existing tunnel
+
+---
+
+## Installation
+
+### One-command install
+
+Ubuntu / Debian
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/AminMGMT/WARP-Manager/main/setup.sh)"
+```
+
+The installer downloads everything, prepares WARP, installs all required components and opens the interactive menu automatically.
+
+Or install manually:
+
+```bash
+git clone https://github.com/AminMGMT/WARP-Manager.git
+cd WARP-Manager
+sudo bash install.sh
+```
+
+Installation progress:
+
+```text
+Installing Dependencies    [################################] 100%
+Copying Files              [################################] 100%
+Preparing WARP             [################################] 100%
+Generating Profile         [################################] 100%
+
+WARP is Ready → sudo wm
+```
+
+After installation a small AI preset is enabled automatically, allowing services such as ChatGPT, Gemini, Claude, Copilot, Grok and Perplexity to work immediately. Everything else can be enabled from the menu with a few keystrokes.
+
+---
+
 ## The Problem
 
 Many VPS providers are unable to access certain services such as **Gemini**, while others may be rate-limited or geo-restricted. Sending all traffic through Cloudflare WARP solves this, but it also changes the server's exit IP for everything, which is often undesirable.
