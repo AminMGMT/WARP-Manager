@@ -458,8 +458,14 @@ menu_filterlists() {
 
         printf '\n %sNumbers%s toggle  %s(3   1 4 7   2-9)%s\n' \
             "$C_PRIMARY" "$C_RESET" "$C_DIM" "$C_RESET"
-        printf ' %sn%s next page   %sp%s previous   %sd%s uBlock defaults   %s0%s back\n\n' \
+        printf ' %sa%s select all   %sn%s select none   %si%s invert   %sd%s uBlock defaults\n' \
             "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        if (( pages > 1 )); then
+            printf ' %s.%s next page   %s,%s previous page   %s0%s back\n\n' \
+                "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        else
+            printf ' %s0%s back\n\n' "$C_PRIMARY" "$C_RESET"
+        fi
         read -rp " > " ch
         case "$ch" in
             0|"")
@@ -476,9 +482,17 @@ menu_filterlists() {
                     pause
                 fi
                 return ;;
-            n|N) (( page + 1 < pages )) && page=$((page+1)) ;;
-            p|P) (( page > 0 )) && page=$((page-1)) ;;
+            a|A) adblock_lists_set_all on;  dirty=1 ;;
+            n|N) adblock_lists_set_all off; dirty=1 ;;
+            i|I) local want=""
+                 for id in "${ids[@]}"; do
+                     adblock_list_is_enabled "$id" || want+="$id"$'\n'
+                 done
+                 printf '%s' "$want" | _adblock_lists_write; dirty=1 ;;
             d|D) adblock_lists_reset; dirty=1 ;;
+            # paging is on . and , so a/n/i mean the same here as in Choose Services
+            .|'>'|+) (( page + 1 < pages )) && page=$((page+1)) ;;
+            ,|'<'|-) (( page > 0 )) && page=$((page-1)) ;;
             *)   while read -r i; do
                      local id="${ids[$(( i - 1 ))]}"
                      if adblock_list_is_enabled "$id"; then adblock_list_disable "$id"; else adblock_list_enable "$id"; fi

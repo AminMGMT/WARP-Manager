@@ -103,8 +103,14 @@ adblock_list_url()    { adblock_list_field "$1" 4; }
 
 # The user's choices live in their own file and win; with no file at all, uBlock's
 # own defaults apply, so a fresh install matches what uBlock ships.
+#
+# The test is the file EXISTING, not it having content. "I want nothing enabled" is
+# a real choice, and judging by size made an empty selection look like no selection
+# — so turning the last list off silently brought all of uBlock's defaults back.
+# The header written by _adblock_lists_write keeps the file non-empty anyway, but
+# existence is the correct question either way.
 adblock_list_is_enabled() {
-    if [[ -s "$WM_ADBLOCK_LISTS" ]]; then
+    if [[ -f "$WM_ADBLOCK_LISTS" ]]; then
         grep -qxF "$1" "$WM_ADBLOCK_LISTS"
     else
         [[ "$(adblock_list_field "$1" 2)" == "on" ]]
@@ -122,15 +128,27 @@ adblock_lists_enabled() {
 }
 # Materialise the defaults into the user file the first time a choice is made, so
 # "enabled" never silently changes underneath the user when uBlock's defaults move.
-_adblock_lists_materialise() {
-    [[ -s "$WM_ADBLOCK_LISTS" ]] && return 0
+# Write a selection from ids on stdin. The header is what makes "nothing enabled"
+# representable: the file stays present and non-empty, so it still reads as a
+# deliberate choice rather than as an absent one.
+_adblock_lists_write() {
     ensure_dirs
-    # Via a temp file, never straight into the target: the redirect truncates it
-    # first, and adblock_lists_enabled reads that same file to decide each id. As
-    # soon as one line landed, the file would look non-empty and the rest of the
-    # ids would be judged against a half-written list instead of the defaults.
     local tmp="${WM_ADBLOCK_LISTS}.new"
-    adblock_lists_enabled >"$tmp" && mv -f "$tmp" "$WM_ADBLOCK_LISTS"
+    {
+        printf '# WARP Manager - filter lists chosen from the menu, one id per line.\n'
+        printf '# Delete this file to go back to the lists uBlock enables by default.\n'
+        grep -vE '^[[:space:]]*(#|$)' || true
+    } >"$tmp"
+    mv -f "$tmp" "$WM_ADBLOCK_LISTS"
+}
+
+_adblock_lists_materialise() {
+    [[ -f "$WM_ADBLOCK_LISTS" ]] && return 0
+    # Through a temp file, never straight into the target: the redirect truncates
+    # it first, and adblock_lists_enabled reads that same file to decide each id.
+    # As soon as one line landed, the rest would be judged against a half-written
+    # selection instead of the defaults.
+    adblock_lists_enabled | _adblock_lists_write
 }
 adblock_list_enable() {
     _adblock_lists_materialise
@@ -138,8 +156,15 @@ adblock_list_enable() {
 }
 adblock_list_disable() {
     _adblock_lists_materialise
-    grep -vxF "$1" "$WM_ADBLOCK_LISTS" >"${WM_ADBLOCK_LISTS}.t" 2>/dev/null || true
-    mv -f "${WM_ADBLOCK_LISTS}.t" "$WM_ADBLOCK_LISTS"
+    grep -vxF "$1" "$WM_ADBLOCK_LISTS" 2>/dev/null | _adblock_lists_write
+}
+# Every list at once. One write instead of 71, and "off" really means off.
+adblock_lists_set_all() {
+    if [[ "${1:-}" == on ]]; then
+        adblock_lists_all | cut -d'|' -f1 | _adblock_lists_write
+    else
+        : | _adblock_lists_write
+    fi
 }
 adblock_lists_reset() { rm -f "$WM_ADBLOCK_LISTS"; }   # back to uBlock's defaults
 # domains contributed by one list at the last build (for the menu)

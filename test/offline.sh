@@ -97,6 +97,18 @@ adblock_list_disable ublock-filters
 is "a list can be turned off" "1" "$(adblock_list_is_enabled ublock-filters; echo $?)"
 adblock_lists_reset
 is "reset returns to uBlock defaults" "$DEFAULT_ON" "$(adblock_lists_enabled | wc -l | tr -d ' ')"
+TOTAL_LISTS="$(adblock_lists_all | wc -l | tr -d ' ')"
+adblock_lists_set_all on
+is "select all enables every list" "$TOTAL_LISTS" "$(adblock_lists_enabled | wc -l | tr -d ' ')"
+adblock_lists_set_all off
+is "select none really disables all" "0" "$(adblock_lists_enabled | wc -l | tr -d ' ')"
+is "an empty selection is still a selection" "0" \
+   "$([[ -f "$WM_ADBLOCK_LISTS" ]] && echo 0 || echo 1)"
+# the bug this replaced: disabling the last list used to bring the defaults back
+adblock_lists_reset
+for _id in $(adblock_lists_enabled); do adblock_list_disable "$_id"; done
+is "disabling one by one ends at zero" "0" "$(adblock_lists_enabled | wc -l | tr -d ' ')"
+adblock_lists_reset
 
 sect "Ad-blocker filter parsing"
 cat >"$SB/fix.txt" <<'FIX'
