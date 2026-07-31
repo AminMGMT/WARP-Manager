@@ -121,12 +121,55 @@ else
 
     if systemctl is-active --quiet "$WM_ADBLOCK_TIMER"; then ok "weekly list refresh scheduled"
     else skip "refresh timer not active"; fi
+
+    # The local list is the primary source; the remote geosite is a bonus. Losing
+    # the bonus must not silently disable blocking (it used to).
+    if jq -e '[.route.rule_set[].tag] | index("adguard-ads")' "$WM_SINGBOX_CONF" >/dev/null 2>&1; then
+        ok "local uBlock-derived rule-set is loaded"
+    else no "local rule-set missing from the engine config"; fi
+
+    printf '     Filter lists     : %s of %s enabled\n' \
+        "$(adblock_lists_enabled | wc -l | tr -d ' ')" "$(adblock_lists_all | wc -l | tr -d ' ')"
+    if [[ "$(adblock_lists_enabled | wc -l | tr -d ' ')" -gt 0 ]]; then ok "at least one filter list enabled"
+    else no "every filter list is disabled — nothing can be built"; fi
+
+    # A service the user chose to route must beat a generic ad list; uBlock's
+    # default set really does contain slackb.com and t.co.
+    LEAK=0
+    while read -r d; do
+        [[ -z "$d" ]] && continue
+        jq -e --arg d "$d" '.rules[0].domain | index($d)' "$WM_ADBLOCK_JSON" >/dev/null 2>&1 && {
+            no "routed domain $d ended up in the block list"; LEAK=1; }
+    done < <(grep -h '^domains=' "$WM_PROVIDERS_DIR"/*.conf 2>/dev/null | sed 's/^domains=//' | tr ' ' '\n' | sort -u)
+    [[ "$LEAK" -eq 0 ]] && ok "no routed service domain is blocked"
+fi
+
+# ---------------------------------------------------------------------------
+section "8b) Automation & presets"
+if autorestart_is_enabled; then
+    if systemctl is-active --quiet "$WM_AUTORESTART_TIMER"; then
+        ok "auto restart timer active (every $(autorestart_interval)h, next $(autorestart_next_run))"
+    else no "auto restart enabled but the timer is not running"; fi
+else
+    skip "auto restart disabled (WARP → Automation → Auto Restart to enable)"
+fi
+
+# Export is read-only, so it is safe to exercise on a live server: build a token
+# and prove it decodes back to a valid preset.
+PRESET_TOKEN="$(preset_export_token 2>/dev/null)"
+if [[ -n "$PRESET_TOKEN" ]] && preset_token_decode "$PRESET_TOKEN" | head -n1 | grep -q '^# warp-manager preset'; then
+    ok "preset code exports and decodes (${#PRESET_TOKEN} chars)"
+else no "preset code could not be produced or did not decode"; fi
+if [[ -n "$PRESET_TOKEN" ]]; then
+    preset_token_decode "${PRESET_TOKEN%.*}.999" >/dev/null 2>&1 \
+        && no "a corrupted preset code was accepted" \
+        || ok "a corrupted preset code is rejected"
 fi
 
 # ---------------------------------------------------------------------------
 section "9) Auto IP health"
 if ! ipcheck_is_enabled; then
-    skip "auto IP health disabled (Manage → Auto IP Health to enable)"
+    skip "auto IP health disabled (WARP → Connection → Auto IP Health to enable)"
 else
     if systemctl is-active --quiet "$WM_IPCHECK_TIMER"; then ok "health-check timer active"
     else no "enabled but the timer is not running"; fi

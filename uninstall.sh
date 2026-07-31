@@ -19,10 +19,14 @@ systemctl disable --now warp-manager-singbox.service >/dev/null 2>&1 || true
 systemctl disable --now warp-manager-watchdog.timer >/dev/null 2>&1 || true
 systemctl disable --now warp-manager-adblock.timer >/dev/null 2>&1 || true
 systemctl disable --now warp-manager-ipcheck.timer >/dev/null 2>&1 || true
+systemctl disable --now warp-manager-autorestart.timer >/dev/null 2>&1 || true
+# Keep this in step with purge_everything() in bin/warp-manager — a unit missed here
+# survives the uninstall and keeps firing at a binary that is no longer there.
 rm -f /etc/systemd/system/warp-manager-boot.service /etc/systemd/system/warp-manager-singbox.service \
       /etc/systemd/system/warp-manager-watchdog.service /etc/systemd/system/warp-manager-watchdog.timer \
       /etc/systemd/system/warp-manager-adblock.service /etc/systemd/system/warp-manager-adblock.timer \
-      /etc/systemd/system/warp-manager-ipcheck.service /etc/systemd/system/warp-manager-ipcheck.timer
+      /etc/systemd/system/warp-manager-ipcheck.service /etc/systemd/system/warp-manager-ipcheck.timer \
+      /etc/systemd/system/warp-manager-autorestart.service /etc/systemd/system/warp-manager-autorestart.timer
 nft delete table inet "${WM_NFT_TABLE:-warp}" 2>/dev/null || true
 systemctl disable --now "wg-quick@${WM_IFACE:-wgcf}" >/dev/null 2>&1 || true
 rm -f "/etc/wireguard/${WM_IFACE:-wgcf}.conf" /etc/sysctl.d/99-warp-manager.conf

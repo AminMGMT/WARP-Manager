@@ -60,6 +60,13 @@ preset_export() {
 
     printf '\n[white-list]\n'
     grep -vE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST" 2>/dev/null || true
+
+    # Only written once the user has actually chosen; absent means "whatever uBlock
+    # enables by default", which is what a target server should then also follow.
+    if [[ -s "$WM_ADBLOCK_LISTS" ]]; then
+        printf '\n[filter-lists]\n'
+        grep -vE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_LISTS" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -213,6 +220,16 @@ preset_import_payload() {
 
     _preset_section "$f" custom-domains >"$WM_CUSTOM_FILE"
     _preset_section "$f" white-list     >"$WM_ADBLOCK_WHITELIST"
+
+    # No [filter-lists] section means the source server was on uBlock's defaults;
+    # clearing the file puts this one on the defaults too, rather than leaving a
+    # stale selection behind that the preset never mentioned.
+    if grep -q '^\[filter-lists\]' "$f"; then
+        _preset_section "$f" filter-lists >"${WM_ADBLOCK_LISTS}.new"
+        mv -f "${WM_ADBLOCK_LISTS}.new" "$WM_ADBLOCK_LISTS"
+    else
+        rm -f "$WM_ADBLOCK_LISTS"
+    fi
 
     log_info "preset: imported $(grep -c . "$WM_ENABLED_FILE" 2>/dev/null || echo 0) services from ${f}."
     return 0

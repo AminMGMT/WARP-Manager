@@ -136,16 +136,23 @@ singbox_write_config() {
     # warp_v6_works); otherwise sing-box would accept v6 it cannot deliver.
     local has_v6=false; warp_v6_works && has_v6=true
 
-    # Ad blocker: wired in only when enabled, a list is built, AND the ads rule-set
-    # file is really on disk — a missing file makes sing-box refuse to start.
-    local ads=false ads_path="" ads_format="" allow_json='[]'
-    if adblock_is_enabled && adblock_has_list \
-       && [[ -n "$(singbox_available_rulesets "$WM_ADBLOCK_GEOSITE")" ]]; then
+    # Ad blocker. The locally built list is the primary source and the only one that
+    # has to be present; the ready-made remote rule-set is a bonus.
+    #
+    # These used to be one condition, which meant a server that cannot reach
+    # raw.githubusercontent.com — the normal case for the VPSes this runs on — got
+    # NO ad blocking at all, silently, while holding a perfectly good 105k-domain
+    # local list. The remote set is now added only if its file is really on disk
+    # (sing-box refuses to start when a rule-set path is missing).
+    local ads=false ads_path="" ads_format="" allow_json='[]' ads_geosite=""
+    if adblock_is_enabled && adblock_has_list; then
         ads=true
         ads_path="$(adblock_ruleset_path)"
         ads_format="$(adblock_ruleset_format)"
         allow_json="$(adblock_allow_domains | jq -R . | jq -s .)"
         [[ -z "$allow_json" ]] && allow_json='[]'
+        [[ -n "$(singbox_available_rulesets "$WM_ADBLOCK_GEOSITE")" ]] && ads_geosite="$WM_ADBLOCK_GEOSITE"
+        [[ -z "$ads_geosite" ]] && log_warn "ads rule-set '${WM_ADBLOCK_GEOSITE}' unavailable; using the local list only."
     fi
 
     # In light mode QUIC never reaches the engine (nft drops it), so the inbound is
@@ -170,7 +177,7 @@ singbox_write_config() {
         --argjson allow "$allow_json" \
         --arg adspath "$ads_path" \
         --arg adsformat "$ads_format" \
-        --arg adsgeosite "$WM_ADBLOCK_GEOSITE" \
+        --arg adsgeosite "$ads_geosite" \
         --arg rsdir "$WM_RULESET_DIR" \
         --arg warpmode "$warp_mode" \
         --argjson net "$net_json" \
@@ -239,15 +246,17 @@ singbox_write_config() {
                        # even when the Cloudflare service is selected.
                        "www.cloudflare.com"], outbound:"direct" } ]
           +
-          # Ad blocker. The allow list is matched BEFORE the block rule so a false
-          # positive can always be undone from the menu, and blocking happens before
-          # the WARP rules so ads are dropped rather than tunnelled.
+          # Ad blocker — allow list first, so a false positive can always be undone
+          # from the menu. The block rule itself is placed AFTER the WARP rules
+          # below: a service you deliberately selected must never be blocked by a
+          # generic ad list. The uBlock default set really does list slackb.com and
+          # t.co, the own domains of Slack and X — the local list has them
+          # subtracted at build time, but the second (remote) ads rule-set is not
+          # ours to edit, so ordering is what guarantees it.
           ( if $ads and ($allow|length) > 0
             then [ { domain: $allow, outbound:"direct" },
                    { domain_suffix: ($allow|map("."+.)), outbound:"direct" } ]
             else [] end )
-          +
-          ( if $ads then [ { rule_set: ["adguard-ads","geosite-"+$adsgeosite], outbound:"block" } ] else [] end )
           +
           # Block QUIC (UDP) of the SELECTED services, so the app falls back to TCP —
           # which we route through WARP reliably. QUIC-over-WARP is flaky (UDP through
@@ -265,6 +274,14 @@ singbox_write_config() {
           +
           ( if ($domains|length) > 0 then [ { domain: $domains, outbound:"warp" },
                                             { domain_suffix: ($domains|map("."+.)), outbound:"warp" } ] else [] end )
+          +
+          # Ads last: everything the user asked to route has already matched above,
+          # so the ad lists can only ever act on traffic nobody selected.
+          ( if $ads
+            then [ { rule_set: ( ["adguard-ads"]
+                                 + ( if $adsgeosite != "" then ["geosite-"+$adsgeosite] else [] end ) ),
+                     outbound:"block" } ]
+            else [] end )
         ),
         # All rule-sets are local files: sing-box never reaches out to GitHub while
         # it is on the traffic path (see singbox_fetch_ruleset).
@@ -273,11 +290,14 @@ singbox_write_config() {
           path:($rsdir + "/geosite-" + . + ".srs")
         }) )
         + ( if $ads
-            then [ # locally built from the AdGuard DNS filter
-                   { tag:"adguard-ads", type:"local", format:$adsformat, path:$adspath },
-                   # second source: the ready-made ads rule-set, also cached locally
-                   { tag:("geosite-"+$adsgeosite), type:"local", format:"binary",
-                     path:($rsdir + "/geosite-" + $adsgeosite + ".srs") } ]
+            then [ # locally built from the enabled uBlock filter lists
+                   { tag:"adguard-ads", type:"local", format:$adsformat, path:$adspath } ]
+                 # second source: the ready-made ads rule-set, only when its file was
+                 # really cached — naming a path that does not exist stops the engine
+                 + ( if $adsgeosite != ""
+                     then [ { tag:("geosite-"+$adsgeosite), type:"local", format:"binary",
+                              path:($rsdir + "/geosite-" + $adsgeosite + ".srs") } ]
+                     else [] end )
             else [] end ) ),
         final: "direct"
       }

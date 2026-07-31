@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WARP Manager - ad blocker (AdGuard lists -> sing-box rule-set)
+# WARP Manager - ad blocker (uBlock Origin's filter lists -> sing-box rule-set)
 # Requires common.sh sourced first.
 #
 # No AdGuard Home, no DNS server, no web UI, no Docker: the engine already sniffs
@@ -7,27 +7,58 @@
 # This file only BUILDS the block/allow lists; wiring them into the sing-box config
 # lives in singbox.sh.
 #
-# Two sources are merged:
-#   1. AdGuard DNS filter  - downloaded and parsed here into a local rule-set
+# ---------------------------------------------------------------------------
+# What "uBlock Origin" can and cannot mean on a server
+# ---------------------------------------------------------------------------
+# uBlock Origin is a *browser extension*. Three things give it its power:
+#   1. network filters   - ||ads.example.com^        <- domain, works here
+#   2. cosmetic filters  - example.com##.ad-banner   <- needs the page DOM
+#   3. scriptlets        - example.com##+js(...)     <- needs to run JS in the page
+# sing-box sees the DOMAIN of a connection (TLS SNI / QUIC ClientHello) and nothing
+# else: the URL path is inside the encrypted stream and there is no page to inspect.
+# So (2) and (3) cannot exist server-side, and neither can any network filter that
+# depends on a path or a request type. Claiming otherwise would just mean blocking
+# things at random.
+#
+# What IS taken from uBlock, in full: its filter-list catalogue — the same lists it
+# ships, with the same nine enabled by default — and from those, every rule that
+# reduces to a domain. That is ~105k domains from uBlock's default set, versus the
+# ~160k DNS-oriented rules of the single AdGuard list used before; the AdGuard list
+# is still in the catalogue for anyone who wants both.
+#
+# Sources merged at build time:
+#   1. the enabled filter lists from data/adblock-lists.conf (uBlock's catalogue)
 #   2. geosite-category-ads-all - a ready-made remote sing-box rule-set
 #
-# Safety: the engine is opt-in (adblock_enabled), a bad/short download never
-# replaces a good list, and a built-in allow list protects connectivity checks.
+# Safety: the blocker is opt-in, a bad or short download never replaces a working
+# list, one unreachable list does not fail the build, and a guard (see
+# _adblock_protected) drops anything the lists would block that this server
+# deliberately routes or needs for connectivity.
 
 WM_ADBLOCK_DIR="${WM_STATE_DIR}/adblock"
 WM_ADBLOCK_JSON="${WM_ADBLOCK_DIR}/adguard.json"      # rule-set (source format)
 WM_ADBLOCK_SRS="${WM_ADBLOCK_DIR}/adguard.srs"        # rule-set (compiled, if supported)
-WM_ADBLOCK_ALLOW_AUTO="${WM_ADBLOCK_DIR}/exceptions.list"  # @@ rules from the filter
+WM_ADBLOCK_ALLOW_AUTO="${WM_ADBLOCK_DIR}/exceptions.list"  # @@ rules from the filters
 WM_ADBLOCK_STAMP="${WM_ADBLOCK_DIR}/updated"          # unix ts of the last good build
+WM_ADBLOCK_STATS="${WM_ADBLOCK_DIR}/stats"            # "<id> <domains>" per list
 WM_ADBLOCK_WHITELIST="${WM_CONF_DIR}/adblock.whitelist"    # user-managed
+WM_ADBLOCK_CATALOGUE="${WM_ROOT}/data/adblock-lists.conf"  # generated from uBlock
+WM_ADBLOCK_LISTS="${WM_CONF_DIR}/adblock.lists"       # user's list choices (ids)
 
-# AdGuard DNS filter (the same list AdGuard Home ships as its default).
-WM_ADBLOCK_URL="https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt"
-# Ready-made ads rule-set for sing-box (second source, merged with the above).
+# Ready-made ads rule-set for sing-box (extra source, merged with the above).
 WM_ADBLOCK_GEOSITE="category-ads-all"
 
-# A download smaller than this is treated as broken (the real list has ~160k rules).
+# A merged result smaller than this is treated as broken (uBlock's default set
+# yields ~105k domains, so this floor only ever trips on a real failure).
 WM_ADBLOCK_MIN_RULES=10000
+
+# Filter modifiers that still mean "this whole domain", so the rule survives the
+# translation to a domain match. Everything else ($script, $image, $xhr, $domain=,
+# $redirect, $removeparam, ...) scopes the rule to a request type or a referring
+# site that a server cannot observe, and $badfilter means the rule is switched off
+# upstream. Those are skipped rather than widened — widening a scoped rule to a
+# whole domain is exactly how an ad blocker takes a site down.
+WM_ADBLOCK_SAFE_MODIFIERS="all doc document popup third-party 3p"
 
 # Never block these, whatever the lists say: client apps measure their "config ping"
 # against connectivity-check endpoints, and killing those makes every tunnel look
@@ -63,43 +94,197 @@ adblock_whitelist_remove() {
     mv -f "${WM_ADBLOCK_WHITELIST}.t" "$WM_ADBLOCK_WHITELIST"
 }
 
+# --- filter-list catalogue ------------------------------------------------
+# Rows are "id|default|title|url"; see data/adblock-lists.conf.
+adblock_lists_all()   { grep -vE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_CATALOGUE" 2>/dev/null; }
+adblock_list_field()  { adblock_lists_all | awk -F'|' -v id="$1" -v n="$2" '$1==id{print $n; exit}'; }
+adblock_list_title()  { adblock_list_field "$1" 3; }
+adblock_list_url()    { adblock_list_field "$1" 4; }
+
+# The user's choices live in their own file and win; with no file at all, uBlock's
+# own defaults apply, so a fresh install matches what uBlock ships.
+adblock_list_is_enabled() {
+    if [[ -s "$WM_ADBLOCK_LISTS" ]]; then
+        grep -qxF "$1" "$WM_ADBLOCK_LISTS"
+    else
+        [[ "$(adblock_list_field "$1" 2)" == "on" ]]
+    fi
+}
+adblock_lists_enabled() {
+    local id
+    while IFS='|' read -r id _; do
+        [[ -n "$id" ]] && adblock_list_is_enabled "$id" && printf '%s\n' "$id"
+    done < <(adblock_lists_all)
+    # Without this the function inherits the status of the LAST id's check, and the
+    # catalogue ends on a disabled list — so every caller using `&&` would see a
+    # perfectly good list of enabled lists as a failure.
+    return 0
+}
+# Materialise the defaults into the user file the first time a choice is made, so
+# "enabled" never silently changes underneath the user when uBlock's defaults move.
+_adblock_lists_materialise() {
+    [[ -s "$WM_ADBLOCK_LISTS" ]] && return 0
+    ensure_dirs
+    # Via a temp file, never straight into the target: the redirect truncates it
+    # first, and adblock_lists_enabled reads that same file to decide each id. As
+    # soon as one line landed, the file would look non-empty and the rest of the
+    # ids would be judged against a half-written list instead of the defaults.
+    local tmp="${WM_ADBLOCK_LISTS}.new"
+    adblock_lists_enabled >"$tmp" && mv -f "$tmp" "$WM_ADBLOCK_LISTS"
+}
+adblock_list_enable() {
+    _adblock_lists_materialise
+    grep -qxF "$1" "$WM_ADBLOCK_LISTS" 2>/dev/null || printf '%s\n' "$1" >>"$WM_ADBLOCK_LISTS"
+}
+adblock_list_disable() {
+    _adblock_lists_materialise
+    grep -vxF "$1" "$WM_ADBLOCK_LISTS" >"${WM_ADBLOCK_LISTS}.t" 2>/dev/null || true
+    mv -f "${WM_ADBLOCK_LISTS}.t" "$WM_ADBLOCK_LISTS"
+}
+adblock_lists_reset() { rm -f "$WM_ADBLOCK_LISTS"; }   # back to uBlock's defaults
+# domains contributed by one list at the last build (for the menu)
+adblock_list_count() {
+    [[ -s "$WM_ADBLOCK_STATS" ]] || { echo "-"; return; }
+    awk -v id="$1" '$1==id{print $2; f=1} END{if(!f)print "-"}' "$WM_ADBLOCK_STATS"
+}
+
+# --- fetching -------------------------------------------------------------
+# Download a list, following uBlock's own `!#include <relative-path>` directive.
+#
+# Several catalogue entries are nothing but a stub of includes — "uBlock filters –
+# Annoyances" is 9 lines, all of them comments plus one include, and PersianBlocker
+# is a stub over eight sub-lists. Without this they parse to zero domains and look
+# like empty lists rather than unfetched ones.
+#
+# Depth is capped and each target is fetched at most once: an include cycle in a
+# third-party list must not turn a weekly refresh into an endless download loop.
+WM_ADBLOCK_INCLUDE_DEPTH=3
+
+_adblock_fetch_list() {
+    local url="$1" dest="$2"
+    : >"$dest"
+    _adblock_fetch_into "$url" "$dest" 0 "" && [[ -s "$dest" ]]
+}
+
+_adblock_fetch_into() {
+    local url="$1" dest="$2" depth="$3" seen="$4"
+    (( depth > WM_ADBLOCK_INCLUDE_DEPTH )) && return 0
+    case " $seen " in *" $url "*) return 0 ;; esac      # already pulled in
+    local tmp; tmp="$(mktemp)"
+    if ! curl -fsSL --connect-timeout 20 --max-time 120 -o "$tmp" "$url"; then
+        rm -f "$tmp"
+        # a missing sub-list is not fatal: the parent's own rules still count
+        (( depth > 0 )) && { log_warn "    include unreachable: ${url}"; return 0; }
+        return 1
+    fi
+    cat "$tmp" >>"$dest"
+    local base inc target
+    base="${url%/*}"
+    while read -r inc; do
+        [[ -n "$inc" ]] || continue
+        case "$inc" in
+            http://*|https://*) target="$inc" ;;
+            /*)                 continue ;;               # absolute path: not ours to resolve
+            *)                  target="${base}/${inc}" ;;
+        esac
+        log_step "    + include $(basename "$inc")"
+        _adblock_fetch_into "$target" "$dest" $((depth + 1)) "$seen $url"
+    done < <(awk '/^!#include[[:space:]]/ { sub(/^!#include[[:space:]]+/, ""); sub(/\r$/, ""); print $1 }' "$tmp")
+    rm -f "$tmp"
+    return 0
+}
+
 # --- build ---------------------------------------------------------------
-# Parse AdGuard syntax into plain domains. 99.7% of the list is `||domain^`;
-# everything we cannot express as a domain match is skipped rather than guessed:
-#   @@rules      -> exceptions file (they must not be blocked)
-#   $badfilter   -> the rule is disabled upstream, drop it
-#   /regex/      -> not expressible as a domain
-#   wildcards *  -> not expressible as a domain suffix
+# Parse one filter list into domains. Handles the two formats uBlock's catalogue
+# actually contains: adblock syntax and hosts files.
+#
+# Kept:   ||domain^                      (and with only WM_ADBLOCK_SAFE_MODIFIERS)
+#         0.0.0.0 domain / 127.0.0.1 domain
+#         @@||domain^                    -> exceptions, which only ever unblock
+# Skipped: cosmetic (##, #@#, #?#, #$#) and scriptlets - impossible server-side
+#         rules with a path or a wildcard  - not expressible as a domain
+#         $domain=/$script/$image/...     - scoped to something a server cannot see
+#         $badfilter                      - the rule is disabled upstream
 _adblock_parse() {
     local src="$1" out_block="$2" out_allow="$3"
-    awk -v blockf="$out_block" -v allowf="$out_allow" '
-        function clean(s) {
-            sub(/\$.*$/, "", s)          # drop $modifiers
-            sub(/^@@/, "", s)
-            sub(/^\|\|/, "", s)
-            sub(/\^.*$/, "", s)          # drop the ^ separator and anything after
-            sub(/^\.+/, "", s)           # ".example.com^" style rules
-            sub(/\/.*$/, "", s)          # drop any path part
-            sub(/^\*\./, "", s)
-            return tolower(s)
-        }
+    awk -v blockf="$out_block" -v allowf="$out_allow" -v safemods="$WM_ADBLOCK_SAFE_MODIFIERS" '
+        BEGIN { n = split(safemods, sm, " "); for (i = 1; i <= n; i++) SAFE[sm[i]] = 1 }
         function valid(d) {
             return (d ~ /^[a-z0-9.-]+$/ && d ~ /\.[a-z][a-z]+$/ \
                     && d !~ /\.\./ && d !~ /^[.-]/ && d !~ /[.-]$/ && length(d) < 254)
         }
-        /^!/            { next }         # comments
+        # every modifier must still mean "the whole domain", or the rule is dropped
+        function mods_ok(opt,   k, a, i, m) {
+            if (opt == "") return 1
+            k = split(opt, a, ",")
+            for (i = 1; i <= k; i++) { m = a[i]; sub(/=.*$/, "", m); if (!(m in SAFE)) return 0 }
+            return 1
+        }
+        { sub(/\r$/, "") }                       # lists are often CRLF
         /^[[:space:]]*$/ { next }
-        /\$badfilter/   { next }         # disabled upstream
-        /^\//           { next }         # regex rule
-        /^@@/ {
-            d = clean($0); if (valid(d)) print d > allowf
+        /^[!\[]/         { next }                # adblock comments / [Adblock Plus 2.0]
+        # hosts format (Peter Lowe, Dan Pollock): "0.0.0.0 tracker.example"
+        /^(0\.0\.0\.0|127\.0\.0\.1)[[:space:]]+/ {
+            d = tolower($2)
+            if (d != "localhost" && d !~ /^localhost\./ && valid(d)) print d > blockf
             next
         }
-        /\*/            { next }         # wildcard: not a plain domain
+        /^#/             { next }                # hosts comment / generic cosmetic
+        /#[@$?%]*#/      { next }                # cosmetic filter or scriptlet
         {
-            d = clean($0); if (valid(d)) print d > blockf
+            line = $0
+            isallow = 0
+            if (substr(line, 1, 2) == "@@") { isallow = 1; line = substr(line, 3) }
+            if (substr(line, 1, 2) != "||") next # anchored-domain rules only
+            line = substr(line, 3)
+            # split pattern from $modifiers
+            p = index(line, "$")
+            if (p > 0) { opt = substr(line, p + 1); pat = substr(line, 1, p - 1) }
+            else       { opt = "";                  pat = line }
+            sub(/\^$/, "", pat)
+            if (pat == "" || index(pat, "/") || index(pat, "*") || index(pat, "^")) next
+            d = tolower(pat)
+            if (!valid(d)) next
+            # Exceptions get the SAME modifier discipline as block rules, and for a
+            # sharper reason. Nearly all of them are scoped:
+            #   @@||doubleclick.net^$script,xhr,domain=viz.com
+            # means "allow doubleclick on viz.com", not "never block doubleclick".
+            # Honouring that scope is impossible here, and obeying it globally would
+            # quietly un-block doubleclick, google-analytics and ~1000 more while the
+            # blocker still looked healthy. Only 5 of ~1035 domain exceptions in
+            # uBlock default set are unscoped. So a scoped exception is ignored,
+            # which errs toward blocking — the list author intent everywhere else —
+            # and any site it does break is one entry in White Lists.
+            if (!mods_ok(opt)) next
+            if (isallow) { print d > allowf; next }
+            print d > blockf
         }
     ' "$src"
+}
+
+# Domains this server must never block, whatever the lists say:
+#   * the connectivity-check endpoints (killing those makes every tunnel look dead)
+#   * every domain in the provider catalogue - these are routed on purpose, and
+#     uBlock's default set really does list some of them (slackb.com, t.co)
+#   * the user's own white list
+# Each domain also protects its parents, because blocking a parent takes the child
+# with it: `.qq.com` as a suffix rule would swallow weixin.qq.com.
+_adblock_protected() {
+    {
+        printf '%s\n' $WM_ADBLOCK_SAFE_DOMAINS
+        [[ -d "$WM_PROVIDERS_DIR" ]] && \
+            grep -h '^domains=' "$WM_PROVIDERS_DIR"/*.conf 2>/dev/null | sed 's/^domains=//' | tr ' ' '\n'
+        [[ -s "$WM_ADBLOCK_WHITELIST" ]] && grep -vE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST"
+    } 2>/dev/null \
+    | tr 'A-Z' 'a-z' | sed 's/[[:space:]]//g' | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' \
+    | awk '{
+        print
+        # walk up to (but not into) the public suffix: a.b.example.com also
+        # protects b.example.com and example.com
+        s = $0
+        while (gsub(/^[^.]+\./, "", s) > 0) { if (split(s, p, ".") < 2) break; print s }
+      }' \
+    | sort -u
 }
 
 # Turn a newline-separated domain list into a sing-box rule-set (source format).
@@ -120,44 +305,84 @@ adblock_build() {
     ensure_dirs
     mkdir -p "$WM_ADBLOCK_DIR"
     has_cmd jq || { log_error "jq is required for the ad blocker."; return 1; }
+    [[ -s "$WM_ADBLOCK_CATALOGUE" ]] || { log_error "Filter-list catalogue missing: $WM_ADBLOCK_CATALOGUE"; return 1; }
 
-    local tmp raw blk alw
+    local tmp blk alw stats
     tmp="$(mktemp -d)" || return 1
-    raw="$tmp/raw.txt"; blk="$tmp/block.txt"; alw="$tmp/allow.txt"
-    : >"$blk"; : >"$alw"
+    blk="$tmp/block.txt"; alw="$tmp/allow.txt"; stats="$tmp/stats"
+    : >"$blk"; : >"$alw"; : >"$stats"
 
-    log_step "Downloading AdGuard DNS filter..."
-    if ! curl -fsSL --connect-timeout 20 --max-time 120 -o "$raw" "$WM_ADBLOCK_URL"; then
+    # Fetch every enabled list. One unreachable source must not cost the whole
+    # blocker — the merged total is sanity-checked at the end instead.
+    local id url title raw lblk lalw got=0 failed=0 nlists=0
+    while read -r id; do
+        [[ -n "$id" ]] || continue
+        nlists=$((nlists+1))
+        url="$(adblock_list_url "$id")"; title="$(adblock_list_title "$id")"
+        [[ -n "$url" ]] || { log_warn "  unknown filter list '${id}'; skipped."; continue; }
+        raw="$tmp/${id}.raw"; lblk="$tmp/${id}.blk"; lalw="$tmp/${id}.alw"
+        : >"$lblk"; : >"$lalw"
+        log_step "  fetching ${title}..."
+        if ! _adblock_fetch_list "$url" "$raw"; then
+            log_warn "  could not download ${title}; continuing without it."
+            failed=$((failed+1)); continue
+        fi
+        _adblock_parse "$raw" "$lblk" "$lalw"
+        printf '%s %s\n' "$id" "$(grep -c . "$lblk" 2>/dev/null || echo 0)" >>"$stats"
+        cat "$lblk" >>"$blk"; cat "$lalw" >>"$alw"
+        got=$((got+1))
+        rm -f "$raw"
+    done < <(adblock_lists_enabled)
+
+    if [[ "$nlists" -eq 0 ]]; then
         rm -rf "$tmp"
-        log_error "Could not download the filter list (network/GitHub blocked?)."
+        log_error "No filter list is enabled (Ad Blocker → Filter Lists); keeping the previous list."
         return 1
     fi
+    if [[ "$got" -eq 0 ]]; then
+        rm -rf "$tmp"
+        log_error "None of the ${nlists} enabled filter lists could be downloaded; keeping the previous list."
+        return 1
+    fi
+    [[ "$failed" -gt 0 ]] && log_warn "${failed} of ${nlists} lists were unreachable."
 
     log_step "Building the block list..."
-    _adblock_parse "$raw" "$blk" "$alw"
-
-    local n; n=$(wc -l <"$blk" 2>/dev/null || echo 0)
+    local n; n=$(sort -u "$blk" | grep -c . || echo 0)
     if [[ "$n" -lt "$WM_ADBLOCK_MIN_RULES" ]]; then
         rm -rf "$tmp"
-        log_error "Filter list looks broken (only ${n} domains); keeping the previous list."
+        log_error "Filter lists look broken (only ${n} domains); keeping the previous list."
         return 1
     fi
 
-    # Drop allow-listed domains from the block set so an exception always wins.
-    local allow_all; allow_all="$tmp/allow_all.txt"
-    { cat "$alw"; printf '%s\n' $WM_ADBLOCK_SAFE_DOMAINS;
-      [[ -s "$WM_ADBLOCK_WHITELIST" ]] && grep -vE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST"; } \
-        2>/dev/null | tr 'A-Z' 'a-z' | sort -u >"$allow_all"
-    sort -u "$blk" | comm -23 - "$allow_all" >"$tmp/final.txt"
+    # An exception, a routed provider domain or a user allow-list entry always wins
+    # over a block rule — see _adblock_protected for why this is not optional.
+    #
+    # Two distinct sets, and mixing them up would be expensive:
+    #   guard  - subtracted from the block list HERE, at build time. It holds every
+    #            provider domain, and those must NOT become runtime "direct" rules:
+    #            sing-box evaluates the ad-blocker allow rules before the WARP
+    #            rules, so that would quietly send every selected service direct.
+    #   alw    - the lists' own @@ exceptions, which do become runtime allow rules,
+    #            because they also have to override the second (remote) ads source.
+    local guard; guard="$tmp/guard.txt"
+    { cat "$alw"; _adblock_protected; } 2>/dev/null \
+        | tr 'A-Z' 'a-z' | sort -u >"$guard"
+    sort -u "$blk" >"$tmp/block_sorted.txt"
+    comm -23 "$tmp/block_sorted.txt" "$guard" >"$tmp/final.txt"
+    sort -u "$alw" >"$tmp/exceptions.txt"
 
-    n=$(wc -l <"$tmp/final.txt")
+    local dropped; dropped=$(( n - $(grep -c . "$tmp/final.txt" 2>/dev/null || echo 0) ))
+    [[ "$dropped" -gt 0 ]] && log_info "Ad blocker: ${dropped} domains held back (routed services, allow list, list exceptions)."
+
+    n=$(grep -c . "$tmp/final.txt" 2>/dev/null || echo 0)
     _adblock_write_ruleset "$tmp/final.txt" "$tmp/adguard.json" || {
         rm -rf "$tmp"; log_error "Could not build the rule-set."; return 1; }
     jq -e . "$tmp/adguard.json" >/dev/null 2>&1 || {
         rm -rf "$tmp"; log_error "Generated rule-set is not valid JSON."; return 1; }
 
     install -m 644 "$tmp/adguard.json" "$WM_ADBLOCK_JSON"
-    install -m 644 "$allow_all" "$WM_ADBLOCK_ALLOW_AUTO"
+    install -m 644 "$tmp/exceptions.txt" "$WM_ADBLOCK_ALLOW_AUTO"
+    install -m 644 "$stats" "$WM_ADBLOCK_STATS"
 
     # A compiled rule-set loads faster and uses less memory; fall back to the
     # source format when this sing-box build has no `rule-set compile`.

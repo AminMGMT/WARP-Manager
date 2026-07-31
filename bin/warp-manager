@@ -422,6 +422,73 @@ menu_whitelist() {
 }
 
 # =========================================================================
+# Ad Blocker — filter lists (uBlock Origin's catalogue)
+# =========================================================================
+menu_filterlists() {
+    local -a ids titles defs
+    local dirty=0
+    mapfile -t ids    < <(adblock_lists_all | cut -d'|' -f1)
+    mapfile -t defs   < <(adblock_lists_all | cut -d'|' -f2)
+    mapfile -t titles < <(adblock_lists_all | cut -d'|' -f3)
+    local total=${#ids[@]} page=0 per=22
+    local pages=$(( (total + per - 1) / per ))
+    # size the column to the real titles instead of guessing: the catalogue is
+    # generated ASCII-only, so a byte-counting %-*s lines up exactly
+    local w=0 t
+    for t in "${titles[@]}"; do (( ${#t} > w )) && w=${#t}; done
+    (( w > 52 )) && w=52
+
+    while true; do
+        banner
+        local on; on="$(adblock_lists_enabled | wc -l | tr -d ' ')"
+        printf '\n %sFilter Lists%s   %s%s of %s enabled   page %s/%s%s\n\n' \
+            "$C_BOLD$C_PRIMARY" "$C_RESET" "$C_GRAY" "$on" "$total" "$((page+1))" "$pages" "$C_RESET"
+        printf ' %suBlock Origin'"'"'s own catalogue. The first nine are the ones uBlock%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %senables out of the box; the rest are its optional and regional lists.%s\n\n' "$C_GRAY" "$C_RESET"
+
+        local i start end
+        start=$(( page * per )); end=$(( start + per )); (( end > total )) && end=$total
+        for (( i = start; i < end; i++ )); do
+            printf '  %s%2d%s %b %s%s%s %s%s%s\n' \
+                "$C_PRIMARY$C_BOLD" "$(( i + 1 ))" "$C_RESET" \
+                "$(adblock_list_is_enabled "${ids[$i]}" && mark_of on || mark_of off)" \
+                "$C_WHITE" "$(printf '%-*s' "$w" "${titles[$i]:0:$w}")" "$C_RESET" \
+                "$C_GRAY" "$(adblock_list_count "${ids[$i]}")" "$C_RESET"
+        done
+
+        printf '\n %sNumbers%s toggle  %s(3   1 4 7   2-9)%s\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_DIM" "$C_RESET"
+        printf ' %sn%s next page   %sp%s previous   %sd%s uBlock defaults   %s0%s back\n\n' \
+            "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET" "$C_PRIMARY" "$C_RESET"
+        read -rp " > " ch
+        case "$ch" in
+            0|"")
+                if [[ "$dirty" -eq 1 ]]; then
+                    printf '\n %sRebuilding the block list from the selected filter lists...%s\n' "$C_GRAY" "$C_RESET"
+                    if adblock_is_enabled; then
+                        adblock_refresh && printf ' %sDone — %s domains.%s\n' "$C_GREEN" "$(adblock_count)" "$C_RESET" \
+                            || printf ' %sCould not rebuild; the previous list is still in use.%s\n' "$C_RED" "$C_RESET"
+                    else
+                        adblock_build >/dev/null 2>&1 \
+                            && printf ' %sDone — %s domains (blocker is still off).%s\n' "$C_GREEN" "$(adblock_count)" "$C_RESET" \
+                            || printf ' %sCould not rebuild the list.%s\n' "$C_RED" "$C_RESET"
+                    fi
+                    pause
+                fi
+                return ;;
+            n|N) (( page + 1 < pages )) && page=$((page+1)) ;;
+            p|P) (( page > 0 )) && page=$((page-1)) ;;
+            d|D) adblock_lists_reset; dirty=1 ;;
+            *)   while read -r i; do
+                     local id="${ids[$(( i - 1 ))]}"
+                     if adblock_list_is_enabled "$id"; then adblock_list_disable "$id"; else adblock_list_enable "$id"; fi
+                     dirty=1
+                 done < <(parse_nums "$ch" "$total") ;;
+        esac
+    done
+}
+
+# =========================================================================
 # Ad Blocker
 # =========================================================================
 
@@ -440,10 +507,13 @@ menu_adblock() {
         else
             printf '   List      %s(not downloaded yet)%s\n' "$C_DIM" "$C_RESET"
         fi
-        printf '\n %sBlocks ads and trackers for everyone using this server,%s\n' "$C_GRAY" "$C_RESET"
-        printf ' %susing the AdGuard DNS filter. No extra service runs.%s\n' "$C_GRAY" "$C_RESET"
+        printf '   Lists     %s of %s enabled\n' \
+            "$(adblock_lists_enabled | wc -l | tr -d ' ')" "$(adblock_lists_all | wc -l | tr -d ' ')"
+        printf '\n %sBlocks ads and trackers for everyone using this server, from%s\n' "$C_GRAY" "$C_RESET"
+        printf ' %suBlock Origin'"'"'s filter lists. No extra service runs.%s\n' "$C_GRAY" "$C_RESET"
         printf '\n   %st%s  Turn %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(adblock_is_enabled && echo off || echo on)"
-        printf '   %su%s  Update list now\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %sf%s  Filter Lists\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %su%s  Update lists now\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '\n %sA blocked site is fixed under WARP → White Lists.%s\n\n' "$C_DIM" "$C_RESET"
         read -rp " > " ch
@@ -477,8 +547,9 @@ menu_adblock() {
                     fi
                 fi
                 pause ;;
+            f|F) menu_filterlists ;;
             u|U)
-                printf '\n %sRefreshing the ad list...%s\n' "$C_GRAY" "$C_RESET"
+                printf '\n %sRefreshing the filter lists...%s\n' "$C_GRAY" "$C_RESET"
                 if adblock_refresh; then printf ' %sUpdated: %s domains.%s\n' "$C_GREEN" "$(adblock_count)" "$C_RESET"
                 else printf ' %sUpdate failed — the previous list is still in use.%s\n' "$C_RED" "$C_RESET"; fi
                 pause ;;

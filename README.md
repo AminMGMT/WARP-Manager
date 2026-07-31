@@ -25,7 +25,7 @@ Telegram: **@BlackProtocols**
 - Domain-based routing using **TLS SNI** and **QUIC ClientHello**
 - 100+ built-in providers across multiple categories
 - Custom domains
-- Global ad blocker (AdGuard DNS Filter + sing-box rules)
+- Global ad blocker (uBlock Origin filter lists + sing-box rules)
 - Automatic WARP IP health monitoring
 - Automatic route refresh and scheduled restart
 - WARP+ license support
@@ -335,10 +335,19 @@ Restarts only the WARP interface and rebuilds the routing engine.
 
 ### Ad Blocker
 
-Blocks ads and trackers using:
+Blocks ads and trackers using **uBlock Origin's filter lists** - the same
+catalogue uBlock ships, with the same nine lists enabled by default, plus its
+optional and regional lists (71 in total, selectable from the menu).
 
-- AdGuard DNS Filter
-- sing-box built-in rule sets
+Only the domain-expressible rules are used. sing-box sees the domain of each
+connection (TLS SNI / QUIC) and never the URL path or the page DOM, so cosmetic
+filters (`##selector`) and scriptlets (`##+js`) cannot apply server-side. That
+still captures **85% of uBlock's network filters** - about 105,000 domains from
+the default set, or ~128,000 with the optional lists on.
+
+A domain a selected service needs is never blocked: every provider domain is
+subtracted from the block list at build time, and the ad rule is evaluated after
+the routing rules.
 
 Runs locally with no DNS server and no additional services.
 
@@ -470,10 +479,10 @@ No manual intervention is required.
 
 The built-in Ad Blocker combines:
 
-- AdGuard DNS Filter
+- uBlock Origin's filter lists (`Ad Blocker -> Filter Lists` to choose them)
 - sing-box rule sets
 
-The filter list is updated automatically every week.
+The lists are updated automatically every week.
 
 Failed downloads never replace a previously working list.
 
