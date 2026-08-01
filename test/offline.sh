@@ -86,8 +86,12 @@ sect "Ad-blocker filter-list catalogue"
 is "catalogue is ASCII (columns line up)" "0" "$(LC_ALL=C grep -c '[^ -~]' "$WM_ADBLOCK_CATALOGUE" || true)"
 DEFAULT_ON="$(adblock_lists_all | awk -F'|' '$2=="on"' | wc -l | tr -d ' ')"
 is "uBlock defaults are enabled when unset" "$DEFAULT_ON" "$(adblock_lists_enabled | wc -l | tr -d ' ')"
-BADURL="$(adblock_lists_all | awk -F'|' '$4 !~ /^https?:\/\// { print $1 }')"
-is "every list has an http(s) URL" "" "$BADURL"
+# remote lists are http(s); bundled ones ship with the repo as file:<path>
+BADURL="$(adblock_lists_all | awk -F'|' '$4 !~ /^(https?:\/\/|file:)/ { print $1 }')"
+is "every list has a usable source" "" "$BADURL"
+BADFILE="$(adblock_lists_all | awk -F'|' '$4 ~ /^file:/ { print $4 }' | sed 's/^file://' \
+           | while read -r rel; do [[ -s "${WM_ROOT}/${rel}" ]] || echo "$rel"; done)"
+is "every bundled list exists" "" "$BADFILE"
 DUPID="$(adblock_lists_all | cut -d'|' -f1 | sort | uniq -d)"
 is "no duplicate list ids" "" "$DUPID"
 adblock_list_enable IRN-0
@@ -146,6 +150,13 @@ is "a routed short domain is protected" "1" "$(grep -c '^t\.co$' "$GUARD" || tru
 is "parents are protected too"          "1" "$(grep -c '^qq\.com$' "$GUARD" || true)"
 is "connectivity checks are protected"  "1" "$(grep -c '^gstatic\.com$' "$GUARD" || true)"
 is "no bare TLD is protected" "" "$(grep -E '^[a-z]+$' "$GUARD" || true)"
+# a custom domain must be guarded straight from its own file: _custom.conf is only
+# written at apply time, so one added since the last list build would be unguarded
+printf 'adform.net\n' >"$WM_CUSTOM_FILE"
+_adblock_protected >"$GUARD"
+is "a custom domain is protected" "1" "$(grep -c '^adform\.net$' "$GUARD" || true)"
+: >"$WM_CUSTOM_FILE"
+_adblock_protected >"$GUARD"
 printf 'slackb.com\nt.co\nqq.com\ndoubleclick.net\n' | sort >"$SB/blk2"
 is "guard removes routed, keeps ads" "doubleclick.net" "$(comm -23 "$SB/blk2" "$GUARD" | tr '\n' ' ' | xargs)"
 
@@ -209,6 +220,10 @@ adblock_is_enabled() { [[ "$ADS" == 1 ]]; }
 adblock_has_list()   { [[ "$ADS" == 1 ]]; }
 adblock_ruleset_path()  { echo "$SB/ads.json"; }
 adblock_ruleset_format(){ echo source; }
+PRIO=1
+adblock_has_prio()      { [[ "$PRIO" == 1 ]]; }
+adblock_prio_path()     { echo "$SB/ads-prio.json"; }
+adblock_prio_format()   { echo source; }
 adblock_allow_domains() { echo 'excepted.example'; }
 printf '%s\n' $ALL_IDS >"$WM_ENABLED_FILE"
 
@@ -226,23 +241,51 @@ undeclared() {
 }
 ADS=1; singbox_write_config >/dev/null 2>&1
 is "ads on: no undeclared rule-set" "" "$(undeclared)"
-I_ADS="$(jq '[.route.rules[] | (.outbound=="block" and .rule_set!=null)] | index(true)' "$WM_SINGBOX_CONF")"
+
+# Rule ORDER is the whole design here, so assert the positions, not just presence.
+idx() { jq --arg t "$1" '[.route.rules[] | ((.rule_set//[]) | index($t)) != null] | index(true)' "$WM_SINGBOX_CONF"; }
+idx_dom() { jq --arg d "$1" '[.route.rules[] | (((.domain//[])+(.domain_suffix//[])) | index($d)) != null] | index(true)' "$WM_SINGBOX_CONF"; }
+I_LOCAL="$(idx adguard-ads)"
+I_PRIO_ADS="$(idx adguard-ads-prio)"
+I_GEO="$(idx geosite-category-ads-all)"
+I_MEDIA="$(idx_dom .googlevideo.com)"
+I_PING="$(idx_dom www.gstatic.com)"
+I_PRIO="$(idx_dom music.youtube.com)"
 I_WARP="$(jq '[.route.rules[] | .outbound=="warp"] | index(true)' "$WM_SINGBOX_CONF")"
-is "routed services beat the ad lists" "1" "$([[ "$I_ADS" -gt "$I_WARP" ]] && echo 1 || echo 0)"
-is "priority rule is first" "music.youtube.com" "$(jq -r '.route.rules[0].domain[0]' "$WM_SINGBOX_CONF")"
+N_RULES="$(jq '.route.rules | length' "$WM_SINGBOX_CONF")"
+# the connectivity block is two rules (suffix + exact); both must precede the ads
+is "connectivity checks come first"       "1" "$([[ "$I_PING" -lt "$I_LOCAL" ]] && echo 1 || echo 0)"
+is "curated ad list beats the media pin"  "1" "$([[ "$I_PRIO_ADS" -lt "$I_MEDIA" ]] && echo 1 || echo 0)"
+# the regression this split exists to prevent: the bulk list must never outrank a
+# routed service or a custom domain added since the last list build
+is "bulk ad list runs after routing"      "1" "$([[ "$I_LOCAL" -gt "$I_WARP" ]] && echo 1 || echo 0)"
+is "bulk ad list runs after the media pin" "1" "$([[ "$I_LOCAL" -gt "$I_MEDIA" ]] && echo 1 || echo 0)"
+is "priority routing beats the media pin" "1" "$([[ "$I_PRIO"  -lt "$I_MEDIA" ]] && echo 1 || echo 0)"
+is "remote ad set is the last rule"       "1" "$([[ "$I_GEO" -eq $(( N_RULES - 1 )) ]] && echo 1 || echo 0)"
+is "remote ad set runs after routing"     "1" "$([[ "$I_GEO" -gt "$I_WARP" ]] && echo 1 || echo 0)"
 is "connectivity checks stay direct" "direct" \
    "$(jq -r 'first(.route.rules[] | select((.domain//[]) | index("www.gstatic.com")) | .outbound)' "$WM_SINGBOX_CONF")"
 is "www.cloudflare.com stays direct" "direct" \
    "$(jq -r 'first(.route.rules[] | select((.domain//[]) | index("www.cloudflare.com")) | .outbound)' "$WM_SINGBOX_CONF")"
+is "video playback stays direct" "direct" \
+   "$(jq -r 'first(.route.rules[] | select((.domain_suffix//[]) | index(".googlevideo.com")) | .outbound)' "$WM_SINGBOX_CONF")"
 
 # The regression that mattered: a server that cannot reach GitHub still gets the
 # locally built list instead of silently losing all ad blocking.
 singbox_available_rulesets() { return 0; }
 singbox_write_config >/dev/null 2>&1
-is "geosite unreachable: still blocks" "1" \
+# both local sets survive; only the remote one drops out
+is "geosite unreachable: still blocks" "2" \
    "$(jq '[.route.rules[] | select(.outbound=="block" and .rule_set!=null)] | length' "$WM_SINGBOX_CONF")"
-is "geosite unreachable: local set only" '["adguard-ads"]' \
+is "geosite unreachable: local sets only" '["adguard-ads-prio","adguard-ads"]' \
    "$(jq -c '[.route.rules[] | select(.outbound=="block") | .rule_set] | flatten' "$WM_SINGBOX_CONF")"
+# with no curated list built, the early rule and its declaration must both vanish
+PRIO=0; singbox_write_config >/dev/null 2>&1
+is "no curated list: no early rule" "0" \
+   "$(jq '[.route.rules[] | select((.rule_set//[]) | index("adguard-ads-prio"))] | length' "$WM_SINGBOX_CONF")"
+is "no curated list: no dangling declaration" "" "$(undeclared)"
+is "no curated list: valid JSON" "0" "$(jq -e . "$WM_SINGBOX_CONF" >/dev/null 2>&1; echo $?)"
+PRIO=1; singbox_write_config >/dev/null 2>&1
 is "geosite unreachable: no undeclared rule-set" "" "$(undeclared)"
 is "geosite unreachable: valid JSON" "0" "$(jq -e . "$WM_SINGBOX_CONF" >/dev/null 2>&1; echo $?)"
 singbox_available_rulesets() { printf '%s\n' "$@"; }
@@ -257,6 +300,41 @@ while read -r u; do
     grep -q -- "$u" "${WM_ROOT}/uninstall.sh" || MISSING+="$u "
 done <<<"$UNITS"
 is "uninstall.sh removes every unit" "" "${MISSING% }"
+
+
+sect "YouTube ad domains (bundled list, built for real)"
+unset -f adblock_is_enabled adblock_has_list adblock_ruleset_path adblock_ruleset_format adblock_allow_domains
+source "${WM_ROOT}/lib/adblock.sh"
+WM_ADBLOCK_DIR="${WM_STATE_DIR}/adblock"
+WM_ADBLOCK_JSON="${WM_ADBLOCK_DIR}/adguard.json"
+WM_ADBLOCK_SRS="${WM_ADBLOCK_DIR}/adguard.srs"
+WM_ADBLOCK_ALLOW_AUTO="${WM_ADBLOCK_DIR}/exceptions.list"
+WM_ADBLOCK_STAMP="${WM_ADBLOCK_DIR}/updated"
+WM_ADBLOCK_STATS="${WM_ADBLOCK_DIR}/stats"
+WM_ADBLOCK_MIN_RULES=1            # this one list is small on purpose
+WM_SINGBOX_BIN=/nonexistent       # no compiler here; source format is the fallback
+printf 'youtube-ads\n' | _adblock_lists_write
+if adblock_build >/dev/null 2>&1; then
+    ok "bundled list builds with no network"
+    BLOCKED="$(cat <(jq -r '.rules[0].domain[]?' "$WM_ADBLOCK_JSON" 2>/dev/null) \
+                   <(jq -r '.rules[0].domain[]?' "$WM_ADBLOCK_PRIO_JSON" 2>/dev/null) | sort -u)"
+    for d in doubleclick.net pagead2.googlesyndication.com www.googletagservices.com \
+             ads.youtube.com adservice.google.com s0.2mdn.net; do
+        is "blocks $d" "1" "$(grep -cxF "$d" <<<"$BLOCKED" || true)"
+    done
+    is "no googlevideo host is blocked" "0" "$(grep -c 'googlevideo\.com' <<<"$BLOCKED" || true)"
+    is "youtube.com itself is not blocked" "0" "$(grep -cxF 'youtube.com' <<<"$BLOCKED" || true)"
+    is "adblock_count spans both rule-sets" \
+       "$(( $(_adblock_count_file "$WM_ADBLOCK_JSON") + $(_adblock_count_file "$WM_ADBLOCK_PRIO_JSON") ))" \
+       "$(adblock_count)"
+    is "curated list went to the early rule-set" "1" \
+       "$([[ -s "$WM_ADBLOCK_PRIO_JSON" ]] && echo 1 || echo 0)"
+    is "list size matches the shipped file" \
+       "$(grep -cvE '^[[:space:]]*(#|$)' "${WM_ROOT}/data/adblock-youtube.txt")" \
+       "$(grep -c . <<<"$BLOCKED")"
+else
+    no "bundled list builds with no network" "build ok" "build failed"
+fi
 
 printf '\n'
 printf '  \033[1mResult:\033[0m \033[32m%d passed\033[0m  \033[31m%d failed\033[0m\n\n' "$PASS" "$FAIL"

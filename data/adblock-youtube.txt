@@ -1,0 +1,56 @@
+# WARP Manager - YouTube ad and tracking domains.
+#
+# These are matched BEFORE the engine's YouTube/media carve-outs, which is the only
+# way they can take effect: ".youtube.com" and ".googlevideo.com" are pinned to
+# direct so heavy video never rides the tunnel, and that pin would otherwise shadow
+# any ad rule underneath it.
+#
+# Source: the non-googlevideo half of Athar5443/Youtube_BlockAds_List, which is what
+# actually works server-side. That list also carries ~9,200 "rN---sn-XXXX.googlevideo.com"
+# hostnames; those are deliberately NOT here. YouTube streams the video AND the ad
+# from the same googlevideo pool, assigned per session out of many thousands of hosts,
+# so blocking a snapshot of them removes no ads and can stall playback when the client
+# cannot find an unblocked host. uBlock Origin's own filter set blocks zero of them,
+# for the same reason. Ads inside the player need a script running in the page; see
+# the note in lib/adblock.sh.
+2975c.v.fwmrm.net
+2mdn.net
+ad-g.doubleclick.net
+ad.doubleclick.net
+ad.mo.doubleclick.net
+ad.youtube.com
+ads.doubleclick.net
+ads.youtube.com
+adservice.google.com
+analytic-google.com
+doubleclick.net
+dts.innovid.com
+files.adform.net
+fls.doubleclick.net
+fwmrm.net
+g.doubleclick.net
+googleadapis.l.google.com
+googleads.g.doubleclick.net
+googleads4.g.doubleclick.net
+googleadservices.com
+innovid.com
+pagead.googlesyndication.com
+pagead.l.doubleclick.net
+pagead1.googlesyndication.com
+pagead2.googlesyndication.com
+pixel.moatads.com
+pubads.g.doubleclick.net
+rtd.tubemogul.com
+s.innovid.com
+s0.2mdn.net
+secure-ds.serving-sys.com
+securepubads.g.doubleclick.net
+ssl.google-analytics.com
+static.doubleclick.net
+stats.g.doubleclick.net
+tpc.googlesyndication.com
+www-google-analytics.l.google.com
+www-googletagmanager.l.google.com
+www.analytic-google.com
+www.googleadservices.com
+www.googletagservices.com

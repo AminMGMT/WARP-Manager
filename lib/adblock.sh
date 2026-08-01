@@ -38,6 +38,18 @@
 WM_ADBLOCK_DIR="${WM_STATE_DIR}/adblock"
 WM_ADBLOCK_JSON="${WM_ADBLOCK_DIR}/adguard.json"      # rule-set (source format)
 WM_ADBLOCK_SRS="${WM_ADBLOCK_DIR}/adguard.srs"        # rule-set (compiled, if supported)
+# Second, much smaller rule-set, matched EARLY — ahead of the engine's YouTube and
+# media carve-outs, which is the only position from which a ".youtube.com" ad host
+# can be blocked at all.
+#
+# Only hand-verified lists belong here. Everything early runs before the routing
+# rules, so a false positive would not merely block a site, it would beat a service
+# the user deliberately selected — or a custom domain added after the last list
+# build, which the build-time guard cannot know about yet. The bulk lists stay in
+# the general rule-set below, where routing always wins.
+WM_ADBLOCK_PRIO_JSON="${WM_ADBLOCK_DIR}/adguard-prio.json"
+WM_ADBLOCK_PRIO_SRS="${WM_ADBLOCK_DIR}/adguard-prio.srs"
+WM_ADBLOCK_PRIORITY_LISTS="youtube-ads"
 WM_ADBLOCK_ALLOW_AUTO="${WM_ADBLOCK_DIR}/exceptions.list"  # @@ rules from the filters
 WM_ADBLOCK_STAMP="${WM_ADBLOCK_DIR}/updated"          # unix ts of the last good build
 WM_ADBLOCK_STATS="${WM_ADBLOCK_DIR}/stats"            # "<id> <domains>" per list
@@ -195,6 +207,16 @@ _adblock_fetch_into() {
     local url="$1" dest="$2" depth="$3" seen="$4"
     (( depth > WM_ADBLOCK_INCLUDE_DEPTH )) && return 0
     case " $seen " in *" $url "*) return 0 ;; esac      # already pulled in
+
+    # Lists shipped with WARP Manager itself (file:<path>, relative to WM_ROOT).
+    # They need no network, so a server that cannot reach GitHub still gets them.
+    if [[ "$url" == file:* ]]; then
+        local src="${WM_ROOT}/${url#file:}"
+        [[ -s "$src" ]] || { log_warn "    bundled list missing: ${src}"; return 1; }
+        cat "$src" >>"$dest"
+        return 0
+    fi
+
     local tmp; tmp="$(mktemp)"
     if ! curl -fsSL --connect-timeout 20 --max-time 120 -o "$tmp" "$url"; then
         rm -f "$tmp"
@@ -256,6 +278,15 @@ _adblock_parse() {
         }
         /^#/             { next }                # hosts comment / generic cosmetic
         /#[@$?%]*#/      { next }                # cosmetic filter or scriptlet
+        # Plain domain lists: one bare hostname per line, no adblock syntax at all.
+        # anti-AD, NeoDev and several YouTube lists ship this way, and without this
+        # they parse to nothing at all. Only a line that is EXACTLY a hostname counts,
+        # so a filter rule can never be mistaken for one.
+        /^[a-z0-9.-]+$/ {
+            d = tolower($0)
+            if (valid(d)) print d > blockf
+            next
+        }
         {
             line = $0
             isallow = 0
@@ -299,6 +330,11 @@ _adblock_protected() {
         printf '%s\n' $WM_ADBLOCK_SAFE_DOMAINS
         [[ -d "$WM_PROVIDERS_DIR" ]] && \
             grep -h '^domains=' "$WM_PROVIDERS_DIR"/*.conf 2>/dev/null | sed 's/^domains=//' | tr ' ' '\n'
+        # Custom domains are read straight from their own file, not only via the
+        # generated _custom.conf provider: that file is written at apply time, so
+        # relying on it alone leaves a domain added since the last list build
+        # unguarded.
+        [[ -s "$WM_CUSTOM_FILE" ]] && grep -vE '^[[:space:]]*(#|$)' "$WM_CUSTOM_FILE"
         [[ -s "$WM_ADBLOCK_WHITELIST" ]] && grep -vE '^[[:space:]]*(#|$)' "$WM_ADBLOCK_WHITELIST"
     } 2>/dev/null \
     | tr 'A-Z' 'a-z' | sed 's/[[:space:]]//g' | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' \
@@ -332,10 +368,10 @@ adblock_build() {
     has_cmd jq || { log_error "jq is required for the ad blocker."; return 1; }
     [[ -s "$WM_ADBLOCK_CATALOGUE" ]] || { log_error "Filter-list catalogue missing: $WM_ADBLOCK_CATALOGUE"; return 1; }
 
-    local tmp blk alw stats
+    local tmp blk pblk alw stats
     tmp="$(mktemp -d)" || return 1
-    blk="$tmp/block.txt"; alw="$tmp/allow.txt"; stats="$tmp/stats"
-    : >"$blk"; : >"$alw"; : >"$stats"
+    blk="$tmp/block.txt"; pblk="$tmp/prio.txt"; alw="$tmp/allow.txt"; stats="$tmp/stats"
+    : >"$blk"; : >"$pblk"; : >"$alw"; : >"$stats"
 
     # Fetch every enabled list. One unreachable source must not cost the whole
     # blocker — the merged total is sanity-checked at the end instead.
@@ -353,8 +389,15 @@ adblock_build() {
             failed=$((failed+1)); continue
         fi
         _adblock_parse "$raw" "$lblk" "$lalw"
-        printf '%s %s\n' "$id" "$(grep -c . "$lblk" 2>/dev/null || echo 0)" >>"$stats"
-        cat "$lblk" >>"$blk"; cat "$lalw" >>"$alw"
+        printf '%s %s\n' "$id" "$(_adblock_nlines "$lblk")" >>"$stats"
+        # Hand-verified lists go to the early rule-set; everything else to the
+        # general one that is evaluated after routing.
+        if [[ " $WM_ADBLOCK_PRIORITY_LISTS " == *" $id "* ]]; then
+            cat "$lblk" >>"$pblk"
+        else
+            cat "$lblk" >>"$blk"
+        fi
+        cat "$lalw" >>"$alw"
         got=$((got+1))
         rm -f "$raw"
     done < <(adblock_lists_enabled)
@@ -372,7 +415,8 @@ adblock_build() {
     [[ "$failed" -gt 0 ]] && log_warn "${failed} of ${nlists} lists were unreachable."
 
     log_step "Building the block list..."
-    local n; n=$(sort -u "$blk" | grep -c . || echo 0)
+    sort -u "$blk" "$pblk" >"$tmp/merged.txt"
+    local n; n=$(_adblock_nlines "$tmp/merged.txt")
     if [[ "$n" -lt "$WM_ADBLOCK_MIN_RULES" ]]; then
         rm -rf "$tmp"
         log_error "Filter lists look broken (only ${n} domains); keeping the previous list."
@@ -392,14 +436,22 @@ adblock_build() {
     local guard; guard="$tmp/guard.txt"
     { cat "$alw"; _adblock_protected; } 2>/dev/null \
         | tr 'A-Z' 'a-z' | sort -u >"$guard"
-    sort -u "$blk" >"$tmp/block_sorted.txt"
+    sort -u "$blk"  >"$tmp/block_sorted.txt"
+    sort -u "$pblk" >"$tmp/prio_sorted.txt"
     comm -23 "$tmp/block_sorted.txt" "$guard" >"$tmp/final.txt"
+    comm -23 "$tmp/prio_sorted.txt"  "$guard" >"$tmp/final_prio.txt"
+    # a domain in the early set never needs to be in the general one as well
+    comm -23 "$tmp/final.txt" "$tmp/final_prio.txt" >"$tmp/final.dedup" \
+        && mv -f "$tmp/final.dedup" "$tmp/final.txt"
     sort -u "$alw" >"$tmp/exceptions.txt"
 
-    local dropped; dropped=$(( n - $(grep -c . "$tmp/final.txt" 2>/dev/null || echo 0) ))
+    local np ng
+    ng=$(_adblock_nlines "$tmp/final.txt")
+    np=$(_adblock_nlines "$tmp/final_prio.txt")
+    local dropped=$(( n - ng - np ))
     [[ "$dropped" -gt 0 ]] && log_info "Ad blocker: ${dropped} domains held back (routed services, allow list, list exceptions)."
+    n=$(( ng + np ))
 
-    n=$(grep -c . "$tmp/final.txt" 2>/dev/null || echo 0)
     _adblock_write_ruleset "$tmp/final.txt" "$tmp/adguard.json" || {
         rm -rf "$tmp"; log_error "Could not build the rule-set."; return 1; }
     jq -e . "$tmp/adguard.json" >/dev/null 2>&1 || {
@@ -409,15 +461,28 @@ adblock_build() {
     install -m 644 "$tmp/exceptions.txt" "$WM_ADBLOCK_ALLOW_AUTO"
     install -m 644 "$stats" "$WM_ADBLOCK_STATS"
 
+    # The early rule-set only exists while a priority list is actually enabled;
+    # leaving a stale file behind would keep blocking after it was turned off.
+    rm -f "$WM_ADBLOCK_PRIO_JSON" "$WM_ADBLOCK_PRIO_SRS"
+    if [[ "$np" -gt 0 ]]; then
+        _adblock_write_ruleset "$tmp/final_prio.txt" "$tmp/prio.json" \
+            && jq -e . "$tmp/prio.json" >/dev/null 2>&1 \
+            && install -m 644 "$tmp/prio.json" "$WM_ADBLOCK_PRIO_JSON" \
+            || { rm -rf "$tmp"; log_error "Could not build the early rule-set."; return 1; }
+    fi
+
     # A compiled rule-set loads faster and uses less memory; fall back to the
     # source format when this sing-box build has no `rule-set compile`.
     rm -f "$WM_ADBLOCK_SRS"
     if "$WM_SINGBOX_BIN" rule-set compile --output "$WM_ADBLOCK_SRS" "$WM_ADBLOCK_JSON" >/dev/null 2>&1 \
        && [[ -s "$WM_ADBLOCK_SRS" ]]; then
-        log_info "Ad blocker: ${n} domains (compiled rule-set)."
+        [[ -s "$WM_ADBLOCK_PRIO_JSON" ]] && \
+            { "$WM_SINGBOX_BIN" rule-set compile --output "$WM_ADBLOCK_PRIO_SRS" "$WM_ADBLOCK_PRIO_JSON" >/dev/null 2>&1 \
+              || rm -f "$WM_ADBLOCK_PRIO_SRS"; }
+        log_info "Ad blocker: ${n} domains (${np} matched ahead of routing) (compiled rule-set)."
     else
-        rm -f "$WM_ADBLOCK_SRS"
-        log_info "Ad blocker: ${n} domains."
+        rm -f "$WM_ADBLOCK_SRS" "$WM_ADBLOCK_PRIO_SRS"
+        log_info "Ad blocker: ${n} domains (${np} matched ahead of routing)."
     fi
 
     date +%s >"$WM_ADBLOCK_STAMP"
@@ -430,10 +495,27 @@ adblock_ruleset_path()   { [[ -s "$WM_ADBLOCK_SRS" ]] && printf '%s' "$WM_ADBLOC
 adblock_ruleset_format() { [[ -s "$WM_ADBLOCK_SRS" ]] && printf 'binary' || printf 'source'; }
 adblock_has_list()       { [[ -s "$WM_ADBLOCK_JSON" ]]; }
 
-# Number of blocked domains in the current list (0 when there is none).
+# The early rule-set exists only while a priority list is enabled.
+adblock_has_prio()        { [[ -s "$WM_ADBLOCK_PRIO_JSON" ]]; }
+adblock_prio_path()       { [[ -s "$WM_ADBLOCK_PRIO_SRS" ]] && printf '%s' "$WM_ADBLOCK_PRIO_SRS" || printf '%s' "$WM_ADBLOCK_PRIO_JSON"; }
+adblock_prio_format()     { [[ -s "$WM_ADBLOCK_PRIO_SRS" ]] && printf 'binary' || printf 'source'; }
+
+# Count non-empty lines. `grep -c` prints 0 AND exits 1 on no match, so the usual
+# `$(grep -c . f || echo 0)` yields the two-line string "0\n0" for an empty file —
+# which then blows up any arithmetic it is fed into. Read stdout, ignore the status.
+_adblock_nlines() {
+    local c
+    c="$(grep -c . "$1" 2>/dev/null)"
+    printf '%s' "${c:-0}"
+}
+
+_adblock_count_file() {
+    [[ -s "$1" ]] || { echo 0; return; }
+    jq -r '[.rules[].domain // [] | length] | add // 0' "$1" 2>/dev/null || echo 0
+}
+# Number of blocked domains across BOTH rule-sets (0 when there is none).
 adblock_count() {
-    [[ -s "$WM_ADBLOCK_JSON" ]] || { echo 0; return; }
-    jq -r '[.rules[].domain // [] | length] | add // 0' "$WM_ADBLOCK_JSON" 2>/dev/null || echo 0
+    echo $(( $(_adblock_count_file "$WM_ADBLOCK_JSON") + $(_adblock_count_file "$WM_ADBLOCK_PRIO_JSON") ))
 }
 
 # --- refresh + scheduled updates -----------------------------------------

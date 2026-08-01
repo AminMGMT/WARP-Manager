@@ -101,8 +101,11 @@ else
     # the allow list must win over the block list
     ALLOW_LEAK=0
     for d in $WM_ADBLOCK_SAFE_DOMAINS; do
-        jq -e --arg d "$d" '.rules[0].domain | index($d)' "$WM_ADBLOCK_JSON" >/dev/null 2>&1 && {
-            no "safe domain $d ended up in the block list"; ALLOW_LEAK=1; }
+        for rs in "$WM_ADBLOCK_JSON" "$WM_ADBLOCK_PRIO_JSON"; do
+            [[ -s "$rs" ]] || continue
+            jq -e --arg d "$d" '.rules[0].domain | index($d)' "$rs" >/dev/null 2>&1 && {
+                no "safe domain $d ended up in the block list"; ALLOW_LEAK=1; }
+        done
     done
     [[ "$ALLOW_LEAK" -eq 0 ]] && ok "no protected domain is blocked"
 
@@ -138,8 +141,11 @@ else
     LEAK=0
     while read -r d; do
         [[ -z "$d" ]] && continue
-        jq -e --arg d "$d" '.rules[0].domain | index($d)' "$WM_ADBLOCK_JSON" >/dev/null 2>&1 && {
-            no "routed domain $d ended up in the block list"; LEAK=1; }
+        for rs in "$WM_ADBLOCK_JSON" "$WM_ADBLOCK_PRIO_JSON"; do
+            [[ -s "$rs" ]] || continue
+            jq -e --arg d "$d" '.rules[0].domain | index($d)' "$rs" >/dev/null 2>&1 && {
+                no "routed domain $d ended up in the block list"; LEAK=1; }
+        done
     done < <(grep -h '^domains=' "$WM_PROVIDERS_DIR"/*.conf 2>/dev/null | sed 's/^domains=//' | tr ' ' '\n' | sort -u)
     [[ "$LEAK" -eq 0 ]] && ok "no routed service domain is blocked"
 fi

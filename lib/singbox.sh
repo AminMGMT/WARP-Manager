@@ -145,10 +145,16 @@ singbox_write_config() {
     # local list. The remote set is now added only if its file is really on disk
     # (sing-box refuses to start when a rule-set path is missing).
     local ads=false ads_path="" ads_format="" allow_json='[]' ads_geosite=""
+    local ads_prio=false prio_path="" prio_format=""
     if adblock_is_enabled && adblock_has_list; then
         ads=true
         ads_path="$(adblock_ruleset_path)"
         ads_format="$(adblock_ruleset_format)"
+        if adblock_has_prio; then
+            ads_prio=true
+            prio_path="$(adblock_prio_path)"
+            prio_format="$(adblock_prio_format)"
+        fi
         allow_json="$(adblock_allow_domains | jq -R . | jq -s .)"
         [[ -z "$allow_json" ]] && allow_json='[]'
         [[ -n "$(singbox_available_rulesets "$WM_ADBLOCK_GEOSITE")" ]] && ads_geosite="$WM_ADBLOCK_GEOSITE"
@@ -174,9 +180,12 @@ singbox_write_config() {
         --argjson prio "$prio_json" \
         --argjson has_v6 "$has_v6" \
         --argjson ads "$ads" \
+        --argjson adsprio "$ads_prio" \
         --argjson allow "$allow_json" \
         --arg adspath "$ads_path" \
         --arg adsformat "$ads_format" \
+        --arg priopath "$prio_path" \
+        --arg prioformat "$prio_format" \
         --arg adsgeosite "$ads_geosite" \
         --arg rsdir "$WM_RULESET_DIR" \
         --arg warpmode "$warp_mode" \
@@ -222,41 +231,58 @@ singbox_write_config() {
           #  - "www.google.com" stays on WARP: the Gemini app talks to it, and routing
           #    is per-domain, so it cannot be direct for /generate_204 and WARP for the
           #    app. Point clients at gstatic.com/generate_204 for a WARP-independent ping.
-          # Priority services (priority=1 in their provider file) are matched FIRST,
-          # ahead of the carve-outs, so a single domain can be lifted out of a broad
-          # direct rule — music.youtube.com riding over the ".youtube.com" carve-out
-          # is the reason this exists. Their QUIC is blocked the same way as any
-          # other selected service, so the app falls back to TCP.
+          # 1) Connectivity checks. Nothing may ever block or tunnel these: client
+          # apps (V2rayNG & co) measure their "config ping" against them, so the
+          # moment one stops answering, every user sees a dead tunnel.
+          # www.cloudflare.com is here because the manager measures the server''s own
+          # non-WARP internet against it and the auto IP health check refuses to
+          # rotate when that probe fails — it must not ride on WARP even when the
+          # Cloudflare service is selected.
+          # Deliberately absent: ".apple.com" (would pull music.apple.com out of the
+          # Apple Music routing) and "www.google.com" (the Gemini app talks to it, and
+          # routing is per-domain — point clients at gstatic.com/generate_204 for a
+          # WARP-independent ping).
+          [ { domain_suffix: [".gstatic.com",".msftconnecttest.com",".msftncsi.com"], outbound:"direct" },
+            { domain: ["clients3.google.com","clients4.google.com",
+                       "gstatic.com","www.gstatic.com","connectivitycheck.gstatic.com",
+                       "www.apple.com","captive.apple.com",
+                       "msftconnecttest.com","www.msftconnecttest.com","msftncsi.com","www.msftncsi.com",
+                       "detectportal.firefox.com","www.cloudflare.com"], outbound:"direct" } ]
+          +
+          # 2) Ad-blocker allow list, so a false positive can always be undone from
+          # the menu without waiting for a list to change upstream.
+          ( if $ads and ($allow|length) > 0
+            then [ { domain: $allow, outbound:"direct" },
+                   { domain_suffix: ($allow|map("."+.)), outbound:"direct" } ]
+            else [] end )
+          +
+          # 3) The small hand-verified ad list, before the media carve-outs below.
+          # This is the only position from which a ".youtube.com" ad host can be
+          # blocked at all: ".youtube.com" and ".googlevideo.com" are pinned to
+          # direct further down to keep heavy video off the tunnel, and that pin
+          # would shadow every ad rule underneath it.
+          # Deliberately NOT the bulk list. Anything here also runs before the
+          # routing rules, so a false positive would beat a service the user
+          # selected — or a custom domain added since the last list build, which the
+          # build-time guard could not have known about. Only WM_ADBLOCK_PRIORITY_LISTS
+          # feeds this set; the bulk lists are matched at step 8 where routing wins.
+          ( if $adsprio then [ { rule_set:["adguard-ads-prio"], outbound:"block" } ] else [] end )
+          +
+          # 4) Priority services (priority=1 in their provider file) — matched ahead
+          # of the carve-outs so a single domain can be lifted out of a broad direct
+          # rule. music.youtube.com riding over the ".youtube.com" carve-out is why
+          # this exists. QUIC is blocked as for any selected service, so apps fall
+          # back to TCP.
           ( if ($prio|length) > 0 then
               ( if $net then [] else [ { network:"udp", domain: $prio, outbound:"block" } ] end )
               + [ { domain: $prio, outbound:"warp" } ]
             else [] end )
           +
-          [ { domain_suffix: [".youtube.com",".googlevideo.com",".ytimg.com",".ggpht.com",
-                              ".gstatic.com",".msftconnecttest.com",".msftncsi.com"], outbound:"direct" },
-            { domain: ["youtube.com","youtu.be","googlevideo.com","ytimg.com","youtubei.googleapis.com",
-                       "clients3.google.com","clients4.google.com",
-                       "gstatic.com","www.gstatic.com","connectivitycheck.gstatic.com",
-                       "www.apple.com","captive.apple.com",
-                       "msftconnecttest.com","www.msftconnecttest.com","msftncsi.com","www.msftncsi.com",
-                       "detectportal.firefox.com",
-                       # the manager measures the server''s own (non-WARP) internet
-                       # against this URL, and the auto IP health check refuses to
-                       # rotate when that probe fails — it must never ride on WARP,
-                       # even when the Cloudflare service is selected.
-                       "www.cloudflare.com"], outbound:"direct" } ]
-          +
-          # Ad blocker — allow list first, so a false positive can always be undone
-          # from the menu. The block rule itself is placed AFTER the WARP rules
-          # below: a service you deliberately selected must never be blocked by a
-          # generic ad list. The uBlock default set really does list slackb.com and
-          # t.co, the own domains of Slack and X — the local list has them
-          # subtracted at build time, but the second (remote) ads rule-set is not
-          # ours to edit, so ordering is what guarantees it.
-          ( if $ads and ($allow|length) > 0
-            then [ { domain: $allow, outbound:"direct" },
-                   { domain_suffix: ($allow|map("."+.)), outbound:"direct" } ]
-            else [] end )
+          # 5) Media carve-outs: keep YouTube video off the tunnel. Routing only —
+          # ad domains under these names were already handled at step 3.
+          [ { domain_suffix: [".youtube.com",".googlevideo.com",".ytimg.com",".ggpht.com"], outbound:"direct" },
+            { domain: ["youtube.com","youtu.be","googlevideo.com","ytimg.com",
+                       "youtubei.googleapis.com"], outbound:"direct" } ]
           +
           # Block QUIC (UDP) of the SELECTED services, so the app falls back to TCP —
           # which we route through WARP reliably. QUIC-over-WARP is flaky (UDP through
@@ -275,12 +301,13 @@ singbox_write_config() {
           ( if ($domains|length) > 0 then [ { domain: $domains, outbound:"warp" },
                                             { domain_suffix: ($domains|map("."+.)), outbound:"warp" } ] else [] end )
           +
-          # Ads last: everything the user asked to route has already matched above,
-          # so the ad lists can only ever act on traffic nobody selected.
-          ( if $ads
-            then [ { rule_set: ( ["adguard-ads"]
-                                 + ( if $adsgeosite != "" then ["geosite-"+$adsgeosite] else [] end ) ),
-                     outbound:"block" } ]
+          # 8) The bulk ad lists, after every routing rule: a service the user chose
+          # to route always wins over a generic ad list. Then the remote rule-set,
+          # dead last — it is not ours to edit, so nothing filters it at build time.
+          ( if $ads then [ { rule_set:["adguard-ads"], outbound:"block" } ] else [] end )
+          +
+          ( if $ads and $adsgeosite != ""
+            then [ { rule_set: ["geosite-"+$adsgeosite], outbound:"block" } ]
             else [] end )
         ),
         # All rule-sets are local files: sing-box never reaches out to GitHub while
@@ -292,6 +319,9 @@ singbox_write_config() {
         + ( if $ads
             then [ # locally built from the enabled uBlock filter lists
                    { tag:"adguard-ads", type:"local", format:$adsformat, path:$adspath } ]
+                 + ( if $adsprio
+                     then [ { tag:"adguard-ads-prio", type:"local", format:$prioformat, path:$priopath } ]
+                     else [] end )
                  # second source: the ready-made ads rule-set, only when its file was
                  # really cached — naming a path that does not exist stops the engine
                  + ( if $adsgeosite != ""

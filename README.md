@@ -570,8 +570,7 @@ Removes:
 
 WARP account registration is powered by
 [wgcf](https://github.com/ViRb3/wgcf).
-
-Special thanks to its contributors.
+Special thanks to [ClassicDarkPack](https://github.com/ClassicDarkPack) for helping compile and maintain the YouTube advertising domain lists used by the Ad Blocker feature.
 
 ---
 
