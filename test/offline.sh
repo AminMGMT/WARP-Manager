@@ -267,6 +267,26 @@ is "connectivity checks stay direct" "direct" \
    "$(jq -r 'first(.route.rules[] | select((.domain//[]) | index("www.gstatic.com")) | .outbound)' "$WM_SINGBOX_CONF")"
 is "www.cloudflare.com stays direct" "direct" \
    "$(jq -r 'first(.route.rules[] | select((.domain//[]) | index("www.cloudflare.com")) | .outbound)' "$WM_SINGBOX_CONF")"
+# Reported by a user: with the ad blocker ON, aistudio.google.com and
+# analytics.google.com stopped working even though Google was routed. The allow
+# list was emitted as domain_suffix "direct" rules ABOVE the routing rules, so
+# ".google.com" (a connectivity-safe domain) sent all of Google out on the server
+# IP. Turning the blocker off "fixed" it. Enabling an ad blocker must never change
+# where a selected service is routed.
+I_ALLOW="$(idx_dom .google.com)"
+is "allow list never outranks routing" "1" "$([[ "$I_ALLOW" -gt "$I_WARP" ]] && echo 1 || echo 0)"
+is "allow list still outranks the block" "1" "$([[ "$I_ALLOW" -lt "$I_LOCAL" ]] && echo 1 || echo 0)"
+first_out() {   # which outbound wins for a hostname
+    jq -r --arg d "$1" '[ .route.rules[]
+        | select( ((.domain//[]) | index($d)) != null
+               or ((.domain_suffix//[]) | map(. as $s | ($d|endswith($s))) | any) ) ][0].outbound // "none"' \
+        "$WM_SINGBOX_CONF"
+}
+for d in aistudio.google.com analytics.google.com music.apple.com; do
+    is "$d is routed with ads on" "warp" "$(first_out "$d")"
+done
+is "connectivity check still direct with ads on" "direct" "$(first_out www.gstatic.com)"
+
 is "video playback stays direct" "direct" \
    "$(jq -r 'first(.route.rules[] | select((.domain_suffix//[]) | index(".googlevideo.com")) | .outbound)' "$WM_SINGBOX_CONF")"
 

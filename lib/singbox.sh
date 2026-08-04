@@ -249,14 +249,7 @@ singbox_write_config() {
                        "msftconnecttest.com","www.msftconnecttest.com","msftncsi.com","www.msftncsi.com",
                        "detectportal.firefox.com","www.cloudflare.com"], outbound:"direct" } ]
           +
-          # 2) Ad-blocker allow list, so a false positive can always be undone from
-          # the menu without waiting for a list to change upstream.
-          ( if $ads and ($allow|length) > 0
-            then [ { domain: $allow, outbound:"direct" },
-                   { domain_suffix: ($allow|map("."+.)), outbound:"direct" } ]
-            else [] end )
-          +
-          # 3) The small hand-verified ad list, before the media carve-outs below.
+          # 2) The small hand-verified ad list, before the media carve-outs below.
           # This is the only position from which a ".youtube.com" ad host can be
           # blocked at all: ".youtube.com" and ".googlevideo.com" are pinned to
           # direct further down to keep heavy video off the tunnel, and that pin
@@ -300,6 +293,23 @@ singbox_write_config() {
           +
           ( if ($domains|length) > 0 then [ { domain: $domains, outbound:"warp" },
                                             { domain_suffix: ($domains|map("."+.)), outbound:"warp" } ] else [] end )
+          +
+          # 7) Ad-blocker allow list — "never blocked", NOT "force direct".
+          #
+          # This used to sit at the very top, which quietly broke the product: the
+          # allow set contains the connectivity-safe domains (google.com, apple.com,
+          # cloudflare.com, ...) and it emits domain_suffix rules, so ".google.com"
+          # matched everything under Google and sent it DIRECT. Turning the ad
+          # blocker on therefore disabled WARP routing for Google, Apple Music and
+          # Cloudflare — aistudio.google.com and analytics.google.com went out on the
+          # server IP and failed, and switching the blocker off "fixed" it.
+          # It only ever needs to outrank the BLOCK rules below, so it belongs here,
+          # after everything that decides routing. The early list at step 2 needs no
+          # runtime allow: the same domains are subtracted from it at build time.
+          ( if $ads and ($allow|length) > 0
+            then [ { domain: $allow, outbound:"direct" },
+                   { domain_suffix: ($allow|map("."+.)), outbound:"direct" } ]
+            else [] end )
           +
           # 8) The bulk ad lists, after every routing rule: a service the user chose
           # to route always wins over a generic ad list. Then the remote rule-set,
