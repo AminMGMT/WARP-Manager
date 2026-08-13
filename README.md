@@ -125,6 +125,32 @@ When a connection matches one of the selected providers, it is forwarded through
 
 Because routing is based on domains rather than destination IPs, applications continue to work correctly even when their backend infrastructure changes.
 
+### Which traffic gets intercepted
+
+There are two ways users' traffic can leave the server, and each needs its own nftables hook:
+
+| Path | Who works this way | Hook |
+|---|---|---|
+| **Local** — the server opens the connection to the site itself | Xray, Marzban, Marznode, Hiddify, Shadowsocks/Outline on `--net=host`, plus the server's own `curl` | `output` |
+| **Forwarded** — the client's packets are *routed through* the server | **OpenVPN**, a **WireGuard server**, or any proxy inside a **bridged Docker container** (e.g. an Outline `shadowbox` that is not `--net=host`) | `prerouting` |
+
+A forwarded packet never passes the `output` hook, so on an OpenVPN box the tunnel works
+but every site keeps seeing the server's plain IP. Both paths are covered now, under the
+same per-domain policy.
+
+`WARP → Connection → Client Traffic` controls the forwarded path:
+
+| Mode | Behaviour |
+|---|---|
+| `auto` *(default)* | Divert only what is actually detected — OpenVPN/tun, a WireGuard interface other than `wgcf`, or a proxy container that is not `--net=host`. A plain Xray/Marznode relay detects nothing and its ruleset is unchanged. |
+| `vpn` | Always divert `tun` / `tap` / `ppp` / `wg` client traffic. |
+| `all` | `vpn` plus Docker bridges. Use this when `auto` missed something. |
+| `off` | The server's own traffic only (the pre-1.x behaviour). |
+
+`WARP → Connection → Diagnose` (or `warp-manager --diagnose`) shows every path found on the
+box, whether it is intercepted, and the live packet counters — so "my users aren't going
+through WARP" is a fact you can read, not a guess.
+
 ### Traffic Flow
 
 ```

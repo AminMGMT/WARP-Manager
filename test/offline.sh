@@ -25,7 +25,7 @@ is()  { [[ "$2" == "$3" ]] && ok "$1" || no "$1" "$2" "$3"; }
 sect(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # --- load the real code, with the host-specific bits stubbed ----------------
-for lib in common warp routing providers adblock ipcheck singbox automation presets; do
+for lib in common warp routing providers adblock ipcheck singbox automation presets diag; do
     source "${WM_ROOT}/lib/${lib}.sh"
 done
 WM_PROVIDERS_DIR="${WM_ROOT}/data/providers"
@@ -355,6 +355,83 @@ if adblock_build >/dev/null 2>&1; then
 else
     no "bundled list builds with no network" "build ok" "build failed"
 fi
+
+# ===========================================================================
+# Client-traffic divert. This is the path an OpenVPN/WireGuard server or a bridged
+# proxy container takes: the packets are ROUTED through the box, so the output hook
+# never sees them and only the prerouting chain can catch them. The point of these
+# tests is that "off"/"auto-detects-nothing" emits byte for byte the ruleset the
+# relay nodes ran before the feature existed.
+sect "Client-traffic divert (nftables ruleset)"
+
+# capture what routing_apply would hand to the kernel instead of touching it
+nft() {
+    if [[ "${1:-}" == "-f" && "${2:-}" == "-" ]]; then cat >"$SB/ruleset.nft"; return 0; fi
+    return 1                       # `nft list table` -> not installed
+}
+_routing_iprules() { :; }          # sysctl + `ip rule`; nothing to assert here
+warp_v6_works() { return 1; }
+wm_have_v6() { return 1; }
+routing_load_exclusions() { :; }
+# nft is not installed on a dev laptop; everything else is answered honestly, so
+# the auto-detectors below really do run and really do find nothing.
+has_cmd() { [[ "$1" == nft ]] && return 0; command -v "$1" >/dev/null 2>&1; }
+# no tun/tap, no foreign wg, no bridged proxy container on the machine running tests
+wm_detect_tuntap()        { return 1; }
+wm_detect_foreign_wg()    { return 1; }
+wm_detect_bridged_proxy() { return 1; }
+
+ruleset() {   # forward_mode quic_mode -> the generated ruleset
+    conf_set forward_mode "$1"; conf_set quic_mode "$2"
+    conf_set forward_ifaces ""
+    : >"$SB/ruleset.nft"
+    routing_apply >/dev/null 2>&1
+    cat "$SB/ruleset.nft"
+}
+has() { grep -qF "$2" <<<"$1" && echo 1 || echo 0; }
+
+R="$(ruleset auto route)"
+is "auto detects nothing here -> no divert chain" "0" "$(has "$R" 'chain fwd_divert')"
+is "auto leaves the local output hook untouched" "1" "$(has "$R" 'chain mangle_output')"
+is "off -> no divert chain" "0" "$(has "$(ruleset off route)" 'chain fwd_divert')"
+
+R="$(ruleset vpn route)"
+is "vpn -> divert chain exists"        "1" "$(has "$R" 'chain fwd_divert')"
+is "vpn -> tun* is jumped"             "1" "$(has "$R" 'iifname "tun*" jump fwd_divert')"
+is "vpn -> tap* is jumped"             "1" "$(has "$R" 'iifname "tap*" jump fwd_divert')"
+is "vpn -> wg* is jumped"              "1" "$(has "$R" 'iifname "wg*" jump fwd_divert')"
+is "vpn -> docker bridges are not"     "0" "$(has "$R" 'iifname "docker*"')"
+is "our own WARP tunnel is excluded"   "1" "$(has "$R" "iifname \"${WM_IFACE}\" return")"
+is "traffic to this box is excluded"   "1" "$(has "$R" 'fib daddr type local return')"
+is "private ranges are excluded"       "1" "$(has "$R" "ip  daddr @${WM_XSET4} return")"
+is "our own marks are excluded"        "1" "$(has "$R" "meta mark ${WM_TPROXY_MARK} return")"
+is "forwarded TCP 80/443 is tproxied"  "1" \
+   "$(has "$R" "tcp dport { 80, 443 } counter tproxy ip to 127.0.0.1:${WM_SINGBOX_PORT} meta mark set ${WM_TPROXY_MARK} accept")"
+is "route mode tproxies forwarded QUIC" "1" \
+   "$(has "$R" "udp dport 443 counter tproxy ip to 127.0.0.1:${WM_SINGBOX_PORT}")"
+is "route mode does not drop QUIC"     "0" "$(has "$R" 'udp dport 443 counter drop')"
+# the guards must come before the tproxy rule or they guard nothing
+GUARD=$(grep -n 'fib daddr type local return' <<<"$R" | head -n1 | cut -d: -f1)
+TPRX=$(grep -n 'counter tproxy ip to' <<<"$R" | tail -n1 | cut -d: -f1)
+is "guards precede the tproxy rule" "1" "$([[ "$GUARD" -lt "$TPRX" ]] && echo 1 || echo 0)"
+
+R="$(ruleset vpn light)"
+is "light mode drops forwarded QUIC"   "1" "$(has "$R" 'udp dport 443 counter drop')"
+is "light mode never tproxies UDP"     "0" "$(has "$R" "udp dport 443 counter tproxy")"
+
+R="$(ruleset all route)"
+is "all -> docker0 is jumped"          "1" "$(has "$R" 'iifname "docker*" jump fwd_divert')"
+is "all -> compose bridges are jumped" "1" "$(has "$R" 'iifname "br-*" jump fwd_divert')"
+
+conf_set forward_mode auto; conf_set forward_ifaces "tun+ br-abc"
+is "an explicit iface list wins over the mode" "br-abc tun+" \
+   "$(routing_forward_ifaces | sort | tr '\n' ' ' | sed 's/ $//')"
+conf_set forward_ifaces ""
+
+conf_set forward_mode vpn
+is "tun0 counts as covered"     "0" "$(_diag_iface_covered tun0; echo $?)"
+is "eth0 does not"              "1" "$(_diag_iface_covered eth0; echo $?)"
+is "our WARP iface is not a client iface" "1" "$(conf_set forward_mode off; _diag_iface_covered "$WM_IFACE"; echo $?)"
 
 printf '\n'
 printf '  \033[1mResult:\033[0m \033[32m%d passed\033[0m  \033[31m%d failed\033[0m\n\n' "$PASS" "$FAIL"

@@ -8,7 +8,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock ipcheck singbox automation presets; do
+for lib in common warp routing providers adblock ipcheck singbox automation presets diag; do
     src="${WM_ROOT}/lib/${lib}.sh"
     [[ -f "$src" ]] || { echo "Library not found: $src" >&2; exit 1; }
     source "$src"
@@ -640,6 +640,65 @@ menu_quic() {
     done
 }
 
+# Which traffic the engine is allowed to see.
+#
+# The engine started life on Xray/marznode relays, where the proxy terminates the
+# user's connection and dials the site itself — that is traffic the SERVER
+# generates, and the output hook catches all of it. An OpenVPN or WireGuard server
+# is a different animal: the client's packets are ROUTED through the box and never
+# pass the output hook, so nothing was intercepted and users kept the plain server
+# IP. Same story for a proxy in a bridged Docker container (e.g. an Outline
+# shadowbox that is not --net=host). This switch decides whether prerouting picks
+# that forwarded traffic up too.
+menu_forward() {
+    while true; do
+        banner
+        local m pats
+        m="$(routing_forward_mode)"
+        pats="$(routing_forward_ifaces | grep -vE '^[[:space:]]*$' | sort -u | tr '\n' ' ')"
+        printf '\n %sClient Traffic%s\n\n' "$C_BOLD$C_PRIMARY" "$C_RESET"
+        printf ' Proxies that dial out themselves (Xray, Marzban, Hiddify, Outline on\n'
+        printf ' --net=host) are always covered. This is about traffic that is %srouted%s\n' "$C_BOLD" "$C_RESET"
+        printf ' %sthrough%s the server instead: OpenVPN, a WireGuard server, or a proxy in a\n' "$C_BOLD" "$C_RESET"
+        printf ' bridged Docker container.\n\n'
+        printf '   Mode            %s%s%s\n' "$C_WHITE$C_BOLD" "$m" "$C_RESET"
+        if [[ -n "$pats" ]]; then
+            printf '   Now diverting   %s%s%s\n' "$C_GREEN" "$pats" "$C_RESET"
+        else
+            printf '   Now diverting   %snothing — the server'"'"'s own traffic only%s\n' "$C_GRAY" "$C_RESET"
+        fi
+        printf '\n   %s1%s  auto   %sdetect it (OpenVPN, a foreign wg, a bridged proxy container)%s\n' \
+            "$C_PRIMARY$C_BOLD" "$C_RESET" "$C_GRAY" "$C_RESET"
+        printf '   %s2%s  vpn    %salways divert tun / tap / ppp / wg client traffic%s\n' \
+            "$C_PRIMARY$C_BOLD" "$C_RESET" "$C_GRAY" "$C_RESET"
+        printf '   %s3%s  all    %svpn + Docker bridges — use this when auto missed something%s\n' \
+            "$C_PRIMARY$C_BOLD" "$C_RESET" "$C_GRAY" "$C_RESET"
+        printf '   %s4%s  off    %sthe server'"'"'s own traffic only%s\n' \
+            "$C_PRIMARY$C_BOLD" "$C_RESET" "$C_GRAY" "$C_RESET"
+        printf '   %sd%s  Diagnose\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
+        read -rp $'\n > ' ch
+        local new=""
+        case "$ch" in
+            1) new=auto ;; 2) new=vpn ;; 3) new=all ;; 4) new=off ;;
+            d|D) banner; diag_run; pause; continue ;;
+            0|"") return ;;
+            *) continue ;;
+        esac
+        conf_set forward_mode "$new"
+        # Only the ruleset changes — sing-box needs no restart, so the engine is
+        # never taken off the traffic path for this.
+        if routing_installed; then
+            routing_apply >/dev/null 2>&1 \
+                && printf '\n %sClient traffic mode is now %s.%s\n' "$C_GREEN" "$new" "$C_RESET" \
+                || printf '\n %sCould not apply the rules — check Status.%s\n' "$C_RED" "$C_RESET"
+        else
+            printf '\n %sSaved. The redirect is not installed right now; it takes effect on the next start.%s\n' "$C_YELLOW" "$C_RESET"
+        fi
+        pause
+    done
+}
+
 menu_ipcheck() {
     while true; do
         banner
@@ -705,6 +764,9 @@ action_status() {
     printf ' %sPlan%s        %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(warp_is_up && warp_plan || echo '-')"
     printf ' %sEngine%s      sing-box %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(singbox_is_up && echo 'running' || echo 'stopped')"
     printf ' %sRedirect%s    %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(routing_installed && echo 'active (TPROXY TCP 80/443 + UDP 443 → sing-box)' || echo 'inactive')"
+    printf ' %sClient traf%s %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+        "$(routing_forward_active && echo "forwarded traffic diverted ($(routing_forward_ifaces | sort -u | tr '\n' ' '))" \
+                                  || echo "server-generated traffic only (mode: $(routing_forward_mode))")"
     if adblock_is_enabled; then
         printf ' %sAd Blocker%s  on — %s domains (updated %s)\n' "$C_PRIMARY$C_BOLD" "$C_RESET" "$(adblock_count)" "$(adblock_last_update)"
     else
@@ -964,12 +1026,18 @@ menu_connection() {
             "$(ipcheck_is_enabled && printf '%s● on%s' "$C_GREEN" "$C_RESET" || printf '%s○ off%s' "$C_GRAY" "$C_RESET")"
         printf '   %s3%s  QUIC Handling  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
             "$([[ "$(routing_quic_mode)" == light ]] && printf '%slight%s' "$C_GREEN" "$C_RESET" || printf '%sroute%s' "$C_GRAY" "$C_RESET")"
+        printf '   %s4%s  Client Traffic  %s\n' "$C_PRIMARY$C_BOLD" "$C_RESET" \
+            "$(routing_forward_active && printf '%s%s ●%s' "$C_GREEN" "$(routing_forward_mode)" "$C_RESET" \
+                                      || printf '%s%s ○%s' "$C_GRAY" "$(routing_forward_mode)" "$C_RESET")"
+        printf '   %s5%s  Diagnose\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         printf '   %s0%s  Back\n' "$C_PRIMARY$C_BOLD" "$C_RESET"
         read -rp $'\n > ' ch
         case "$ch" in
             1) action_change_ip ;;
             2) menu_ipcheck ;;
             3) menu_quic ;;
+            4) menu_forward ;;
+            5) banner; diag_run; pause ;;
             0|"") return ;;
         esac
     done
@@ -1080,6 +1148,7 @@ case "${1:-}" in
     --location)  warp_location; exit 0 ;;
     --license)   require_root; warp_apply_license "${2:-}" && { warp_up; singbox_reload; }; exit $? ;;
     --status)    status_line; exit 0 ;;
+    --diagnose)  diag_run; exit 0 ;;
     --watchdog)  watchdog_run; exit 0 ;;
     --adblock-update) require_root; adblock_refresh; exit $? ;;
     --ip-check)  require_root; ipcheck_run; exit 0 ;;
@@ -1104,6 +1173,7 @@ WARP Manager
   warp-manager --refresh      re-apply the engine (config + routes)
   warp-manager --up           bring WARP + sing-box + TPROXY up
   warp-manager --down         stop the engine (remove TPROXY, stop sing-box/WARP)
+  warp-manager --diagnose     show which traffic paths exist and which are intercepted
   warp-manager --change-ip    get a new WARP IP
   warp-manager --import-account FILE  import a wgcf-account.toml from another server
   warp-manager --location     show WARP location

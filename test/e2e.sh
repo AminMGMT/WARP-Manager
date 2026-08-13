@@ -8,7 +8,7 @@ WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 [[ -f "${WM_ROOT}/lib/common.sh" ]] || WM_ROOT="/opt/warp-manager"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock ipcheck singbox automation presets; do source "${WM_ROOT}/lib/${lib}.sh"; done
+for lib in common warp routing providers adblock ipcheck singbox automation presets diag; do source "${WM_ROOT}/lib/${lib}.sh"; done
 
 PASS=0; FAIL=0; SKIP=0
 ok()      { printf '  %s✔ PASS%s  %s\n' "$C_GREEN" "$C_RESET" "$1"; PASS=$((PASS+1)); }
@@ -38,6 +38,31 @@ else no "tproxy rule not found"; fi
 if ip rule show 2>/dev/null | grep -q "lookup ${WM_TPROXY_TABLE}"; then
     ok "policy route (fwmark ${WM_TPROXY_MARK} → table ${WM_TPROXY_TABLE})"
 else no "tproxy policy route missing"; fi
+
+# Forwarded client traffic: OpenVPN / a WireGuard server / a bridged proxy container
+# never touch the output hook, so only the prerouting divert can catch them. On a
+# plain Xray/Marznode relay there is nothing to catch and every line below skips.
+FWD_PATS="$(routing_forward_ifaces | grep -vE '^[[:space:]]*$' | sort -u | tr '\n' ' ')"
+if [[ -z "$FWD_PATS" ]]; then
+    skip "no forwarded client traffic on this box (mode: $(routing_forward_mode))"
+else
+    if nft list chain inet "$WM_NFT_TABLE" fwd_divert >/dev/null 2>&1; then
+        ok "forwarded client traffic diverted (${FWD_PATS})"
+    else no "forward divert expected for ${FWD_PATS} but the chain is missing"; fi
+
+    if nft list chain inet "$WM_NFT_TABLE" fwd_divert 2>/dev/null | grep -q "iifname \"${WM_IFACE}\" return"; then
+        ok "our own WARP tunnel is excluded from the divert"
+    else no "the ${WM_IFACE} exclusion is missing — risk of a routing loop"; fi
+
+    if nft list chain inet "$WM_NFT_TABLE" fwd_divert 2>/dev/null | grep -q 'fib daddr type local return'; then
+        ok "traffic addressed to this server is left alone"
+    else no "the 'daddr is local' guard is missing — the panel/SSH could be proxied"; fi
+
+    FWD_PKTS="$(nft list chain inet "$WM_NFT_TABLE" fwd_divert 2>/dev/null \
+                | grep -oE 'counter packets [0-9]+' | awk '{s+=$3} END {print s+0}')"
+    if [[ "${FWD_PKTS:-0}" -gt 0 ]]; then ok "forwarded packets reaching the engine: ${FWD_PKTS}"
+    else skip "no forwarded packet has hit the divert yet (connect a client, then re-run)"; fi
+fi
 
 section "4) Exit IP: direct vs WARP"
 DIRECT_IP="$(curl -s --connect-timeout 8 "$CF_TRACE_URL" 2>/dev/null | awk -F= '/^ip=/{print $2}')"

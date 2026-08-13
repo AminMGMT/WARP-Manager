@@ -61,6 +61,105 @@ routing_quic_mode() {
     [[ "$m" == "light" ]] && printf 'light' || printf 'route'
 }
 
+# --- forwarded (client) traffic ------------------------------------------
+# The output hook above only ever sees traffic the SERVER ITSELF generates. That
+# covers every proxy that terminates the client's connection and dials out from the
+# host (Xray/marznode, Hiddify, a host-networked Shadowsocks/Outline), which is why
+# this worked from day one on the relay nodes. It is completely blind to two setups
+# that are just as common:
+#
+#   * OpenVPN / WireGuard *servers*: the client's packets arrive on tun0/wg0 and are
+#     ROUTED through the box (prerouting -> forward -> postrouting). They never touch
+#     the output hook, so nothing was ever intercepted and every site kept seeing the
+#     server's own IP — the tunnel "worked" but selective WARP routing did nothing.
+#   * a proxy inside a bridged Docker container (an Outline shadowbox that is not
+#     --net=host, x-ui/3x-ui in compose, ...): the container dials out from its own
+#     network namespace, so from the host's point of view that is forwarded traffic
+#     too, arriving on docker0 / br-xxxx.
+#
+# Both are picked up here, in prerouting, under exactly the same policy as local
+# traffic: TCP 80/443 (plus UDP 443, depending on the QUIC mode) is TPROXY'd into
+# sing-box, which decides per sniffed domain whether it goes via WARP or direct.
+#
+# forward_mode:
+#   auto - (default) emit a pattern only when this box actually has that kind of
+#          traffic. A plain Xray/marznode relay detects nothing and keeps byte for
+#          byte the ruleset it had before this feature existed.
+#   vpn  - always divert tun/tap/ppp/wg client traffic
+#   all  - vpn + docker bridges
+#   off  - local traffic only (the old behaviour)
+# forward_ifaces overrides all of that with an explicit space-separated list of
+# nft iifname patterns (e.g. "tun* br-abc123").
+routing_forward_mode() {
+    local m; m="$(conf_get forward_mode auto)"
+    case "$m" in off|auto|vpn|all) printf '%s' "$m" ;; *) printf 'auto' ;; esac
+}
+
+# docker can be installed with a dead daemon; never let that hang the engine
+_wm_docker() {
+    has_cmd docker || return 1
+    if has_cmd timeout; then timeout 5 docker "$@" 2>/dev/null; else docker "$@" 2>/dev/null; fi
+}
+
+# a live tun/tap/ppp device, or an OpenVPN that will create one the moment a client
+# connects (detecting the binary matters: at boot there is no tun0 yet)
+wm_detect_tuntap() {
+    ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 \
+        | grep -qE '^(tun|tap|ppp)[0-9]' && return 0
+    has_cmd openvpn && return 0
+    [[ -d /etc/openvpn ]] && return 0
+    return 1
+}
+
+# WireGuard interfaces that are NOT our own WARP tunnel — i.e. a WG server carrying
+# other people's traffic, whose packets are forwarded rather than locally generated.
+wm_detect_foreign_wg() {
+    local n
+    while read -r n; do
+        n="${n%%@*}"
+        [[ -z "$n" || "$n" == "$WM_IFACE" ]] && continue
+        return 0
+    done < <( { ip -o link show type wireguard 2>/dev/null | awk -F': ' '{print $2}';
+                wg show interfaces 2>/dev/null | tr ' ' '\n'; } )
+    return 1
+}
+
+WM_PROXY_CONTAINER_RE='shadowbox|outline|shadowsocks|ss-server|xray|marz|hysteria|sing-?box|x-ui|hiddify|v2ray|trojan|openvpn'
+
+# A proxy running in a container with its OWN netns (anything but --net=host): its
+# egress leaves through a docker bridge, so the host sees it as forwarded traffic.
+# Outline's own installer uses --net=host, in which case this correctly finds
+# nothing — that server is already covered by the local/output path.
+wm_detect_bridged_proxy() {
+    local name net
+    while read -r name; do
+        [[ -z "$name" ]] && continue
+        net="$(_wm_docker inspect -f '{{.HostConfig.NetworkMode}}' "$name")"
+        [[ "$net" == host ]] && continue
+        return 0
+    done < <(_wm_docker ps --format '{{.Names}} {{.Image}}' | grep -iE "$WM_PROXY_CONTAINER_RE" | awk '{print $1}')
+    return 1
+}
+
+# nft iifname patterns whose FORWARDED traffic is diverted. Empty output = the
+# prerouting divert is not installed at all.
+routing_forward_ifaces() {
+    local mode; mode="$(routing_forward_mode)"
+    [[ "$mode" == off ]] && return 0
+    local custom; custom="$(conf_get forward_ifaces "")"
+    if [[ -n "$custom" ]]; then printf '%s\n' $custom; return 0; fi
+    case "$mode" in
+        vpn) printf 'tun*\ntap*\nppp*\nwg*\n'; return 0 ;;
+        all) printf 'tun*\ntap*\nppp*\nwg*\ndocker*\nbr-*\n'; return 0 ;;
+    esac
+    wm_detect_tuntap        && printf 'tun*\ntap*\nppp*\n'
+    wm_detect_foreign_wg    && printf 'wg*\n'
+    wm_detect_bridged_proxy && printf 'docker*\nbr-*\n'
+    return 0
+}
+
+routing_forward_active() { [[ -n "$(routing_forward_ifaces)" ]]; }
+
 routing_apply() {
     require_root
     has_cmd nft || die "nftables (nft) is not installed."
@@ -70,6 +169,50 @@ routing_apply() {
     # would be sent into a black hole (see warp_v6_works) while v4 is perfectly fine.
     local v6=0; warp_v6_works && v6=1
     [[ "$v6" -eq 0 ]] && wm_have_v6 && log_warn "WARP has no working IPv6; IPv6 traffic will go direct."
+
+    # Forwarded-traffic divert (OpenVPN/WireGuard clients, bridged containers).
+    # Built here so that when nothing is detected both strings stay empty and the
+    # emitted ruleset is identical to the pre-existing one.
+    local fwd_pats fwd_jump="" fwd_chain="" pat
+    fwd_pats="$(routing_forward_ifaces | grep -vE '^[[:space:]]*$' | sort -u)"
+    if [[ -n "$fwd_pats" ]]; then
+        while read -r pat; do
+            [[ -z "$pat" ]] && continue
+            fwd_jump+="        iifname \"${pat}\" jump fwd_divert"$'\n'
+        done <<<"$fwd_pats"
+        # Guards first, in the same spirit as mangle_output: our own tunnel, our own
+        # marks, anything addressed to this machine (a VPN client opening the panel
+        # must not be proxied), and the private/reserved + WARP-endpoint sets.
+        # `counter` is deliberate: it is the only honest answer to "is my OpenVPN
+        # traffic actually reaching the engine?" (see `warp-manager --diagnose`).
+        fwd_chain="
+    chain fwd_divert {
+        iifname \"${WM_IFACE}\" return
+        meta mark ${WM_MARK_HEX} return
+        meta mark 0xcab1 return
+        meta mark ${WM_TPROXY_MARK} return
+        fib daddr type local return
+        ip  daddr @${WM_XSET4} return
+        ip6 daddr @${WM_XSET6} return
+        meta nfproto ipv4 tcp dport { 80, 443 } counter tproxy ip to 127.0.0.1:${WM_SINGBOX_PORT} meta mark set ${WM_TPROXY_MARK} accept"
+        if [[ "$qmode" == route ]]; then
+            fwd_chain+="
+        meta nfproto ipv4 udp dport 443 counter tproxy ip to 127.0.0.1:${WM_SINGBOX_PORT} meta mark set ${WM_TPROXY_MARK} accept"
+        fi
+        if [[ "$v6" -eq 1 ]]; then
+            fwd_chain+="
+        meta nfproto ipv6 tcp dport { 80, 443 } counter tproxy ip6 to [::1]:${WM_SINGBOX_PORT} meta mark set ${WM_TPROXY_MARK} accept"
+            [[ "$qmode" == route ]] && fwd_chain+="
+        meta nfproto ipv6 udp dport 443 counter tproxy ip6 to [::1]:${WM_SINGBOX_PORT} meta mark set ${WM_TPROXY_MARK} accept"
+        fi
+        # light mode: same deal as for local traffic — QUIC never reaches the engine,
+        # dropping it makes the client fall back to TCP, which is the path we route.
+        [[ "$qmode" == light ]] && fwd_chain+="
+        udp dport 443 counter drop"
+        fwd_chain+="
+    }
+"
+    fi
     # v6 tproxy/mark lines are emitted only when the host has IPv6 (see the $( … )
     # blocks inside the ruleset), so a v4-only box stays clean.
     # Rebuild idempotently: ensure the table exists, delete it, then recreate — so a
@@ -88,7 +231,7 @@ table inet ${WM_NFT_TABLE} {
     set ${WM_XSET6} { type ipv6_addr; flags interval; auto-merge;
         elements = { ::1/128, fc00::/7, fe80::/10,
                      2606:4700:d0::/48, 2606:4700:d1::/48 } }
-
+${fwd_chain}
     # Diverted (output-marked) packets loop back to lo and land here; TPROXY hands
     # them to sing-box. Gated on our mark so inbound traffic (SSH, the proxy's own
     # 443 listener, ...) is never touched.
@@ -98,7 +241,11 @@ table inet ${WM_NFT_TABLE} {
 $( [[ "$qmode" == route ]] && printf '        meta mark %s meta nfproto ipv4 meta l4proto udp tproxy ip to 127.0.0.1:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
 $( [[ "$v6" -eq 1 ]] && printf '        meta mark %s meta nfproto ipv6 meta l4proto tcp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
 $( [[ "$v6" -eq 1 && "$qmode" == route ]] && printf '        meta mark %s meta nfproto ipv6 meta l4proto udp tproxy ip6 to [::1]:%s accept' "$WM_TPROXY_MARK" "$WM_SINGBOX_PORT" )
-    }
+        # Forwarded client traffic (OpenVPN/WireGuard/bridged containers). These
+        # jumps come last so a packet already carrying our divert mark — i.e. one
+        # looping back through lo from mangle_output — is handled above and never
+        # reaches them.
+${fwd_jump}    }
 
     # Mark locally-generated 80/443 TCP and 443 UDP so it is rerouted to lo (above).
     # 'type route' forces a re-route when the mark changes.
@@ -113,10 +260,10 @@ $( [[ "$v6" -eq 1 && "$qmode" == route ]] && printf '        meta mark %s meta n
         meta mark 0xcab1 return
         ip  daddr @${WM_XSET4} return
         ip6 daddr @${WM_XSET6} return
-        meta nfproto ipv4 tcp dport { 80, 443 } meta mark set ${WM_TPROXY_MARK}
-$( [[ "$qmode" == route ]] && printf '        meta nfproto ipv4 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" )
-$( [[ "$v6" -eq 1 ]] && printf '        meta nfproto ipv6 tcp dport { 80, 443 } meta mark set %s' "$WM_TPROXY_MARK" )
-$( [[ "$v6" -eq 1 && "$qmode" == route ]] && printf '        meta nfproto ipv6 udp dport 443 meta mark set %s' "$WM_TPROXY_MARK" )
+        meta nfproto ipv4 tcp dport { 80, 443 } counter meta mark set ${WM_TPROXY_MARK}
+$( [[ "$qmode" == route ]] && printf '        meta nfproto ipv4 udp dport 443 counter meta mark set %s' "$WM_TPROXY_MARK" )
+$( [[ "$v6" -eq 1 ]] && printf '        meta nfproto ipv6 tcp dport { 80, 443 } counter meta mark set %s' "$WM_TPROXY_MARK" )
+$( [[ "$v6" -eq 1 && "$qmode" == route ]] && printf '        meta nfproto ipv6 udp dport 443 counter meta mark set %s' "$WM_TPROXY_MARK" )
     }
 $( [[ "$qmode" == light ]] && cat <<QEOF
 
@@ -140,6 +287,9 @@ EOF
         log_info "nftables rules applied (TCP 80/443 → sing-box; QUIC dropped, clients use TCP)."
     else
         log_info "nftables TPROXY rules applied (TCP 80/443 + UDP 443 → sing-box)."
+    fi
+    if [[ -n "$fwd_pats" ]]; then
+        log_info "Forwarded client traffic is diverted too ($(printf '%s' "$fwd_pats" | tr '\n' ' '))."
     fi
 }
 

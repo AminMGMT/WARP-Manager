@@ -26,7 +26,9 @@ WM_PRESET_TOKEN_PREFIX="WMP1"
 
 # Settings carried by a preset. Anything not listed stays whatever the target server
 # already has, so a preset can never silently change something it does not describe.
-WM_PRESET_KEYS="quic_mode adblock_enabled ipcheck_enabled ipcheck_bad_locs ipcheck_max_per_day ipcheck_min_interval autorestart_enabled autorestart_interval license_key"
+# forward_mode travels; forward_ifaces deliberately does not — an explicit list of
+# interface names is true for one host and meaningless (or wrong) on the next.
+WM_PRESET_KEYS="quic_mode forward_mode adblock_enabled ipcheck_enabled ipcheck_bad_locs ipcheck_max_per_day ipcheck_min_interval autorestart_enabled autorestart_interval license_key"
 
 _preset_section() {   # <file> <section> -> the lines of that section
     awk -v s="[$2]" '
