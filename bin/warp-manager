@@ -8,7 +8,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 WM_ROOT="${WM_ROOT:-$(dirname "$(dirname "$SELF")")}"
 export WM_ROOT
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock ipcheck singbox automation presets diag; do
+for lib in common warp routing providers adblock ipcheck singbox automation presets diag purge; do
     src="${WM_ROOT}/lib/${lib}.sh"
     [[ -f "$src" ]] || { echo "Library not found: $src" >&2; exit 1; }
     source "$src"
@@ -1110,31 +1110,19 @@ action_uninstall() {
     read -rp " Type 'yes' to confirm: " yn
     [[ "$yn" == "yes" ]] || { echo " Cancelled."; pause; return; }
     purge_everything
-    printf '\n %sDone. WARP Manager has been completely removed.%s\n\n' "$C_GREEN" "$C_RESET"
+    local left; left="$(purge_leftovers)"
+    if [[ -z "$left" ]]; then
+        printf '\n %sDone. WARP Manager has been completely removed — no reboot needed.%s\n\n' "$C_GREEN" "$C_RESET"
+    else
+        printf '\n %sRemoved, but these are still present:%s\n' "$C_YELLOW" "$C_RESET"
+        printf '%s\n' "$left" | sed 's/^/   /'
+        printf ' %sRun it once more, or reboot to clear them.%s\n\n' "$C_GRAY" "$C_RESET"
+    fi
     exit 0
 }
 
-purge_everything() {
-    systemctl disable --now warp-manager-boot.service >/dev/null 2>&1 || true
-    systemctl disable --now "$WM_SINGBOX_SERVICE" >/dev/null 2>&1 || true
-    systemctl disable --now "$WM_WATCHDOG_TIMER" >/dev/null 2>&1 || true
-    systemctl disable --now "$WM_ADBLOCK_TIMER" >/dev/null 2>&1 || true
-    systemctl disable --now "$WM_IPCHECK_TIMER" >/dev/null 2>&1 || true
-    systemctl disable --now "$WM_AUTORESTART_TIMER" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/${WM_SINGBOX_SERVICE}" /etc/systemd/system/warp-manager-boot.service \
-          "/etc/systemd/system/${WM_WATCHDOG_SERVICE}" "/etc/systemd/system/${WM_WATCHDOG_TIMER}" \
-          "/etc/systemd/system/${WM_ADBLOCK_SERVICE}" "/etc/systemd/system/${WM_ADBLOCK_TIMER}" \
-          "/etc/systemd/system/${WM_IPCHECK_SERVICE}" "/etc/systemd/system/${WM_IPCHECK_TIMER}" \
-          "/etc/systemd/system/${WM_AUTORESTART_SERVICE}" "/etc/systemd/system/${WM_AUTORESTART_TIMER}"
-    routing_teardown 2>/dev/null || true
-    warp_down 2>/dev/null || true
-    systemctl disable --now "wg-quick@${WM_IFACE}" >/dev/null 2>&1 || true
-    rm -f "$WM_WG_CONF" /etc/sysctl.d/99-warp-manager.conf
-    rm -f /usr/local/bin/warp-manager /usr/local/bin/wm /usr/local/bin/wgcf "$WM_SINGBOX_BIN"
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    sysctl --system >/dev/null 2>&1 || true
-    rm -rf "$WM_CONF_DIR" "$WM_STATE_DIR" "$WM_ROOT"
-}
+# purge_everything() and purge_leftovers() live in lib/purge.sh, so `wm -> Uninstall`
+# and `bash uninstall.sh` cannot drift apart again.
 
 # =========================================================================
 # Non-interactive subcommands (systemd / scripts)
@@ -1165,7 +1153,16 @@ case "${1:-}" in
         exit $? ;;
     --import-preset) require_root; preset_import "${2:-}" && { adblock_timer_setup; ipcheck_timer_setup; autorestart_timer_setup; engine_apply; }; exit $? ;;
     --update)    require_root; exec bash -c "$(curl -fsSL --connect-timeout 20 "$WM_UPDATE_URL")" ;;
-    --purge)     require_root; purge_everything; exit 0 ;;
+    --purge)
+        require_root; purge_everything
+        left="$(purge_leftovers)"
+        if [[ -z "$left" ]]; then echo "Removed completely — no reboot needed."; exit 0; fi
+        echo "Removed, but still present:"; printf '%s\n' "$left" | sed 's/^/   /'; exit 1 ;;
+    --leftovers)
+        require_root
+        left="$(purge_leftovers)"
+        if [[ -z "$left" ]]; then echo "Nothing of WARP Manager is left on this host."; exit 0; fi
+        printf '%s\n' "$left" | sed 's/^/   /'; exit 1 ;;
     -h|--help)
         cat <<EOF
 WARP Manager
@@ -1186,7 +1183,8 @@ WARP Manager
   warp-manager --export-preset FILE   write the preset to a file instead
   warp-manager --import-preset CODE|FILE  apply a preset and restart the engine
   warp-manager --update       update to the latest version (keeps your config)
-  warp-manager --purge        remove everything
+  warp-manager --purge        remove everything (rules and sysctls included)
+  warp-manager --leftovers    list anything of ours still on the host
 EOF
         exit 0 ;;
 esac

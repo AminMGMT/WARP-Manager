@@ -1,38 +1,40 @@
 #!/usr/bin/env bash
 # WARP Manager - uninstaller (full purge)
+#   sudo bash uninstall.sh
+#
+# The actual removal lives in lib/purge.sh, shared with `wm -> Uninstall`. This file
+# used to carry its own hand-written copy of the steps, which drifted: it never
+# removed the policy-routing rules, the runtime sysctls or a wgcf link that systemd
+# had not managed to drop — none of which are on disk, so only a reboot cleared them.
 set -uo pipefail
 WM_ROOT="${WM_ROOT:-/opt/warp-manager}"
 export WM_ROOT
+
 SRC="$WM_ROOT/lib"
 [[ -f "$SRC/common.sh" ]] || SRC="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib"
+[[ -f "$SRC/common.sh" && -f "$SRC/purge.sh" ]] || { echo "WARP Manager libraries not found ($SRC)."; exit 1; }
+# purge.sh deliberately needs nothing but common.sh, so an installation that is
+# already half-deleted can still be cleaned up properly.
 # shellcheck source=/dev/null
-source "$SRC/common.sh" 2>/dev/null || { echo "WARP Manager not found."; }
+source "$SRC/common.sh"
+# shellcheck source=/dev/null
+source "$SRC/purge.sh"
+
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root: sudo bash uninstall.sh"; exit 1; }
 
-echo "This removes EVERYTHING: WARP interface, WARP account, sing-box, rules,"
-echo "config, systemd units, and all warp-manager files."
+echo "This removes EVERYTHING: WARP interface, WARP account, sing-box, nftables and"
+echo "policy-routing rules, config, systemd units, and all warp-manager files."
 read -rp "Type 'yes' to confirm: " yn
 [[ "$yn" == "yes" ]] || { echo "Cancelled."; exit 0; }
 
-systemctl disable --now warp-manager-boot.service >/dev/null 2>&1 || true
-systemctl disable --now warp-manager-singbox.service >/dev/null 2>&1 || true
-systemctl disable --now warp-manager-watchdog.timer >/dev/null 2>&1 || true
-systemctl disable --now warp-manager-adblock.timer >/dev/null 2>&1 || true
-systemctl disable --now warp-manager-ipcheck.timer >/dev/null 2>&1 || true
-systemctl disable --now warp-manager-autorestart.timer >/dev/null 2>&1 || true
-# Keep this in step with purge_everything() in bin/warp-manager — a unit missed here
-# survives the uninstall and keeps firing at a binary that is no longer there.
-rm -f /etc/systemd/system/warp-manager-boot.service /etc/systemd/system/warp-manager-singbox.service \
-      /etc/systemd/system/warp-manager-watchdog.service /etc/systemd/system/warp-manager-watchdog.timer \
-      /etc/systemd/system/warp-manager-adblock.service /etc/systemd/system/warp-manager-adblock.timer \
-      /etc/systemd/system/warp-manager-ipcheck.service /etc/systemd/system/warp-manager-ipcheck.timer \
-      /etc/systemd/system/warp-manager-autorestart.service /etc/systemd/system/warp-manager-autorestart.timer
-nft delete table inet "${WM_NFT_TABLE:-warp}" 2>/dev/null || true
-systemctl disable --now "wg-quick@${WM_IFACE:-wgcf}" >/dev/null 2>&1 || true
-rm -f "/etc/wireguard/${WM_IFACE:-wgcf}.conf" /etc/sysctl.d/99-warp-manager.conf
-rm -f /usr/local/bin/warp-manager /usr/local/bin/wm /usr/local/bin/wgcf "${WM_SINGBOX_BIN:-/usr/local/bin/sing-box}"
-systemctl daemon-reload >/dev/null 2>&1 || true
-sysctl --system >/dev/null 2>&1 || true
-rm -rf "${WM_CONF_DIR:-/etc/warp-manager}" "${WM_STATE_DIR:-/var/lib/warp-manager}" "$WM_ROOT"
+purge_everything
 
-echo "Done. WARP Manager has been completely removed."
+LEFT="$(purge_leftovers)"
+if [[ -z "$LEFT" ]]; then
+    echo "Done. WARP Manager has been completely removed — no reboot needed."
+else
+    echo "Removed, but these are still present:"
+    printf '%s\n' "$LEFT" | sed 's/^/   /'
+    echo "Run it once more, or reboot to clear them."
+    exit 1
+fi

@@ -10,7 +10,7 @@ export WM_ROOT
 
 # load libraries (functions); runtime data paths point at /opt after the copy step
 # shellcheck source=/dev/null
-for lib in common warp routing providers adblock ipcheck singbox automation presets diag; do source "${SRC_DIR}/lib/${lib}.sh"; done
+for lib in common warp routing providers adblock ipcheck singbox automation presets diag purge; do source "${SRC_DIR}/lib/${lib}.sh"; done
 require_root
 
 INSTALL_LOG="/tmp/warp-manager-install.log"

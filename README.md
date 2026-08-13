@@ -581,6 +581,18 @@ sudo bash uninstall.sh
 sudo warp-manager --purge
 ```
 
+Both run the same removal and finish by verifying it, so no reboot is needed. Besides
+the files and systemd units, this also clears the parts that exist only in the running
+kernel and used to survive until a restart: the nftables table, the policy-routing
+rules and tables (`51888` / `51890`), the `wgcf` link, any leftover `sing-box` process,
+and the `route_localnet` sysctl.
+
+`net.ipv4.ip_forward` is deliberately left on — the box may be your OpenVPN or NAT
+gateway, and turning it off would drop every user.
+
+If anything could not be removed it is listed instead of being silently ignored;
+`sudo warp-manager --leftovers` reports the same list at any time.
+
 Removes:
 
 - WARP

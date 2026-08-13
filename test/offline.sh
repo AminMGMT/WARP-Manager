@@ -25,7 +25,7 @@ is()  { [[ "$2" == "$3" ]] && ok "$1" || no "$1" "$2" "$3"; }
 sect(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # --- load the real code, with the host-specific bits stubbed ----------------
-for lib in common warp routing providers adblock ipcheck singbox automation presets diag; do
+for lib in common warp routing providers adblock ipcheck singbox automation presets diag purge; do
     source "${WM_ROOT}/lib/${lib}.sh"
 done
 WM_PROVIDERS_DIR="${WM_ROOT}/data/providers"
@@ -313,13 +313,19 @@ ADS=0; singbox_write_config >/dev/null 2>&1
 is "ads off: no block rule" "0" "$(jq '[.route.rules[] | select(.outbound=="block" and .rule_set!=null)] | length' "$WM_SINGBOX_CONF")"
 
 sect "Systemd unit coverage"
+# The uninstall no longer names units one by one (that list drifted and left units
+# behind); it globs warp-manager-*. So the invariant to guard is the naming itself:
+# a unit called anything else would never be picked up.
 UNITS="$(grep -ohE 'warp-manager-[a-z]+\.(service|timer)' "${WM_ROOT}/bin/warp-manager" "${WM_ROOT}"/lib/*.sh | sort -u)"
+is "there are units to remove" "0" "$([[ -n "$UNITS" ]] && echo 0 || echo 1)"
 MISSING=""
 while read -r u; do
     [[ -z "$u" ]] && continue
-    grep -q -- "$u" "${WM_ROOT}/uninstall.sh" || MISSING+="$u "
+    [[ "$u" == warp-manager-* ]] || MISSING+="$u "
 done <<<"$UNITS"
-is "uninstall.sh removes every unit" "" "${MISSING% }"
+is "every unit is inside the purge glob" "" "${MISSING% }"
+is "the boot unit ships with that name" "1" \
+   "$(ls "${WM_ROOT}/systemd" | grep -c '^warp-manager-.*\.service$' || true)"
 
 
 sect "YouTube ad domains (bundled list, built for real)"
@@ -432,6 +438,49 @@ conf_set forward_mode vpn
 is "tun0 counts as covered"     "0" "$(_diag_iface_covered tun0; echo $?)"
 is "eth0 does not"              "1" "$(_diag_iface_covered eth0; echo $?)"
 is "our WARP iface is not a client iface" "1" "$(conf_set forward_mode off; _diag_iface_covered "$WM_IFACE"; echo $?)"
+
+# ===========================================================================
+# Uninstall. The bug these guard against: `bash uninstall.sh` carried its own
+# hand-written copy of the removal steps and had drifted from the menu's — it never
+# dropped the policy-routing rules, the runtime sysctls or a wgcf link systemd had
+# lost track of. None of those live on disk, which is why only a reboot cleared them.
+sect "Uninstall"
+
+is "there is exactly one purge implementation" "1" \
+   "$([[ "$(type -t purge_everything)" == function ]] && echo 1 || echo 0)"
+is "bin/warp-manager no longer defines its own" "0" \
+   "$(grep -c '^purge_everything()' "${WM_ROOT}/bin/warp-manager" || true)"
+is "uninstall.sh uses the shared one" "1" \
+   "$(grep -c 'purge_everything' "${WM_ROOT}/uninstall.sh" || true)"
+
+# The purge finds units by glob, so a unit whose name breaks the pattern would be
+# silently left behind on every uninstall from now on.
+STRAY="$(grep -rhoE '"?warp[a-z-]*\.(service|timer)"?' "${WM_ROOT}/lib" "${WM_ROOT}/bin" "${WM_ROOT}/systemd" \
+         | tr -d '"' | sort -u | grep -v '^warp-manager-' || true)"
+is "every unit name matches the purge glob" "" "$STRAY"
+
+# `ip rule del` is called in a loop until nothing matches. An iproute2 that kept
+# answering 0 would hang the uninstall — and a hung uninstall on a live relay is
+# worse than a leftover rule, so the loop is bounded.
+IPCALLS=0
+ip() { IPCALLS=$((IPCALLS+1)); return 0; }
+_purge_del_rules rule del table 51890
+is "rule deletion cannot loop forever" "1" \
+   "$([[ "$IPCALLS" -gt 0 && "$IPCALLS" -le 64 ]] && echo 1 || echo 0)"
+unset -f ip
+
+# purge_leftovers is what turns "it said Done" into something checkable
+WM_ROOT_BAK="$WM_ROOT"
+WM_ROOT="$SB/fakeroot"; mkdir -p "$WM_ROOT"
+is "a leftover directory is reported" "1" "$(purge_leftovers | grep -c "$WM_ROOT" || true)"
+rmdir "$WM_ROOT"
+is "and is not once it is gone"      "0" "$(purge_leftovers | grep -c "$WM_ROOT" || true)"
+WM_ROOT="$WM_ROOT_BAK"
+
+# forwarding must survive the uninstall: the box may be the OpenVPN/NAT gateway and
+# zeroing it would cut every user off. route_localnet is ours and must not survive.
+is "purge resets route_localnet"   "2" "$(grep -c 'route_localnet=0' "${WM_ROOT}/lib/purge.sh" || true)"
+is "purge never touches ip_forward" "0" "$(grep -c 'ip_forward *= *0\|ip_forward=0' "${WM_ROOT}/lib/purge.sh" || true)"
 
 printf '\n'
 printf '  \033[1mResult:\033[0m \033[32m%d passed\033[0m  \033[31m%d failed\033[0m\n\n' "$PASS" "$FAIL"
