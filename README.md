@@ -8,7 +8,8 @@
 
 <p align="center">
 
-Route only the services you choose through Cloudflare WARP while everything else continues using your server's public IP.
+Route only the services you choose through Cloudflare WARP while everything else keeps your
+server's public IP.
 
 No Docker • Pure Bash • Zero changes to your tunnel or proxy configuration
 
@@ -18,40 +19,18 @@ Telegram: **@BlackProtocols**
 
 ---
 
-## Features
+## Install
 
-- Route only selected services through Cloudflare WARP
-- Keep all other traffic on the server's native IP
-- Domain-based routing using **TLS SNI** and **QUIC ClientHello**
-- 100+ built-in providers across multiple categories
-- Custom domains
-- Global ad blocker (uBlock Origin filter lists + sing-box rules)
-- Automatic WARP IP health monitoring
-- Automatic route refresh and scheduled restart
-- WARP+ license support
-- Import / Export presets
-- Interactive CLI
-- Fail-open protection
-- HTTP/3 (QUIC) support
-- Pure Bash
-- No Docker
-- No changes to Xray, Marzban, Hiddify, OpenVPN, WireGuard or your existing tunnel
-
----
-
-## Installation
-
-### One-command install
-
-Ubuntu / Debian
+Ubuntu / Debian:
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/AminMGMT/WARP-Manager/main/setup.sh)"
 ```
 
-The installer downloads everything, prepares WARP, installs all required components and opens the interactive menu automatically.
+The installer downloads everything, prepares WARP, and opens the menu when it is done.
 
-Or install manually:
+<details>
+<summary>Manual install</summary>
 
 ```bash
 git clone https://github.com/AminMGMT/WARP-Manager.git
@@ -59,99 +38,26 @@ cd WARP-Manager
 sudo bash install.sh
 ```
 
-Installation progress:
+</details>
 
-```text
-Installing Dependencies    [################################] 100%
-Copying Files              [################################] 100%
-Preparing WARP             [################################] 100%
-Generating Profile         [################################] 100%
+A small AI preset is enabled automatically, so ChatGPT, Gemini, Claude, Copilot, Grok and
+Perplexity work immediately. Open the menu to change it:
 
-WARP is Ready → sudo wm
-```
-
-After installation a small AI preset is enabled automatically, allowing services such as ChatGPT, Gemini, Claude, Copilot, Grok and Perplexity to work immediately. Everything else can be enabled from the menu with a few keystrokes.
-
----
-
-## The Problem
-
-Many VPS providers are unable to access certain services such as **Gemini**, while others may be rate-limited or geo-restricted. Sending all traffic through Cloudflare WARP solves this, but it also changes the server's exit IP for everything, which is often undesirable.
-
-WARP Manager solves this by routing **only the services you choose** through Cloudflare WARP while every other connection continues to use the VPS's normal public IP.
-
-Your existing tunnel, proxy and panel remain completely untouched.
-
----
-
-## Architecture
-
-```
-                              Client
-                                 │
-                        (Tunnel / VPN / Proxy)
-                                 │
-                                 ▼
-┌────────────────────────────── VPS ──────────────────────────────┐
-│                                                                 │
-│               Outbound TCP 80/443 + UDP 443                     │
-│                            │                                    │
-│                            ▼                                    │
-│                    nftables TPROXY                              │
-│                            │                                    │
-│                            ▼                                    │
-│                      sing-box Engine                            │
-│                (TLS SNI + QUIC Inspection)                      │
-│                            │                                    │
-│              ┌─────────────┴─────────────┐                      │
-│              │                           │                      │
-│       Selected Services           Everything Else              │
-│              │                           │                      │
-│              ▼                           ▼                      │
-│      Cloudflare WARP              Native Server IP             │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```bash
+sudo wm
 ```
 
 ---
 
-## How It Works
+## What it does
 
-WARP Manager intercepts only the VPS's outbound HTTPS traffic using **nftables TPROXY** and forwards it to **sing-box** running locally.
+Sending *everything* through WARP fixes a blocked VPS but changes your exit IP for all
+traffic. WARP Manager sends only the domains you pick.
 
-Instead of routing by IP address, sing-box inspects the real destination domain from the TLS **Server Name Indication (SNI)** and **QUIC ClientHello**. This makes routing reliable even for modern applications that frequently change IP addresses or use CDNs.
-
-When a connection matches one of the selected providers, it is forwarded through the Cloudflare WARP WireGuard interface. Every other connection bypasses WARP and leaves through the VPS's normal network interface.
-
-Because routing is based on domains rather than destination IPs, applications continue to work correctly even when their backend infrastructure changes.
-
-### Which traffic gets intercepted
-
-There are two ways users' traffic can leave the server, and each needs its own nftables hook:
-
-| Path | Who works this way | Hook |
-|---|---|---|
-| **Local** — the server opens the connection to the site itself | Xray, Marzban, Marznode, Hiddify, Shadowsocks/Outline on `--net=host`, plus the server's own `curl` | `output` |
-| **Forwarded** — the client's packets are *routed through* the server | **OpenVPN**, a **WireGuard server**, or any proxy inside a **bridged Docker container** (e.g. an Outline `shadowbox` that is not `--net=host`) | `prerouting` |
-
-A forwarded packet never passes the `output` hook, so on an OpenVPN box the tunnel works
-but every site keeps seeing the server's plain IP. Both paths are covered now, under the
-same per-domain policy.
-
-`WARP → Connection → Client Traffic` controls the forwarded path:
-
-| Mode | Behaviour |
-|---|---|
-| `auto` *(default)* | Divert only what is actually detected — OpenVPN/tun, a WireGuard interface other than `wgcf`, or a proxy container that is not `--net=host`. A plain Xray/Marznode relay detects nothing and its ruleset is unchanged. |
-| `vpn` | Always divert `tun` / `tap` / `ppp` / `wg` client traffic. |
-| `all` | `vpn` plus Docker bridges. Use this when `auto` missed something. |
-| `off` | The server's own traffic only (the pre-1.x behaviour). |
-
-`WARP → Connection → Diagnose` (or `warp-manager --diagnose`) shows every path found on the
-box, whether it is intercepted, and the live packet counters — so "my users aren't going
-through WARP" is a fact you can read, not a guess.
-
-### Traffic Flow
+It intercepts the server's outbound HTTP/HTTPS with **nftables TPROXY** and hands it to a
+local **sing-box**, which reads the real destination from the TLS **SNI** and **QUIC
+ClientHello** and decides per domain: selected services go out through Cloudflare WARP,
+everything else through the server's normal interface.
 
 ```
 Application
@@ -160,7 +66,6 @@ Application
 Is the destination selected?
      │
  ┌───┴──────────────┐
- │                  │
  ▼                  ▼
 Yes                No
  │                  │
@@ -168,449 +73,50 @@ Yes                No
 Cloudflare WARP   Direct Internet
 ```
 
----
-
-## Design Goals
-
-- Route only the traffic that actually needs WARP.
-- Leave existing tunnels, proxies and panels untouched.
-- No Docker containers.
-- No DNS hijacking.
-- No public listening ports.
-- Fully automatic installation.
-- Safe fail-open behavior if the routing engine becomes unavailable.
-- Support both HTTP/2 and HTTP/3 (QUIC).
-- Keep the configuration simple enough to migrate between servers.
+Because the decision is made by domain and not by IP, applications keep working when their
+backends or CDNs change. Your tunnel, proxy and panel are never modified — and if the engine
+becomes unhealthy, a fail-open watchdog removes the redirect so traffic keeps flowing.
 
 ---
 
-## Usage
+## Features
 
-Start WARP Manager:
+- **100+ built-in providers** across AI, streaming, social, gaming, developer and cloud —
+  plus your own custom domains
+- **Domain-based routing** via TLS SNI and QUIC ClientHello, with full HTTP/3 support
+- **Works with any stack** — Xray, Marzban, Marznode, Hiddify, OpenVPN, WireGuard, Outline
+- **Ad blocker** built on uBlock Origin's filter lists, with no DNS server or extra service
+- **Automatic IP health monitoring**, scheduled restarts and route refresh
+- **Presets** to clone a whole configuration onto another server in seconds
+- **WARP+ license** support
+- **Fail-open protection** — a broken engine can never take your tunnel down
+- Pure Bash, no Docker, no DNS hijacking, no public listening ports
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [How It Works](docs/how-it-works.md) | Architecture, the two interception paths, tunnel safety, design goals |
+| [Menu Reference](docs/menu.md) | Every screen and setting, plus the command-line flags |
+| [Providers](docs/providers.md) | The full catalogue and how to add your own |
+| [Ad Blocker](docs/ad-blocker.md) | What it blocks, what it cannot, and why it is safe |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnose, rate limits, updates, uninstall |
+
+Not routing what you expected? Start with:
 
 ```bash
-sudo wm
-# or
-sudo warp-manager
+sudo warp-manager --diagnose
 ```
-
-Main menu:
-
-```text
-1. WARP ● ON
-    1. Choose Services
-    2. Custom Domains
-    3. White Lists
-    4. Connection
-        1. Change IP
-        2. Auto IP Health
-        3. QUIC Handling
-    5. Automation
-        1. Auto Restart
-        2. Refresh Routes
-    6. Presets
-        1. Export Preset
-        2. Import Preset
-        3. Import WARP Account
-    7. WARP+ License
-    8. Status
-    9. Restart WARP
-
-2. Ad Blocker ○ OFF
-
-3. Restart All Services
-
-4. Update
-
-5. Uninstall
-
-6. Exit
-```
-
----
-
-## Menu Overview
-
-### WARP
-
-All WARP-related features are grouped under a single menu.
-
-### Choose Services
-
-Select which services should use Cloudflare WARP.
-
-Over **100 providers** are available across multiple categories, including AI, Streaming, Social Media, Gaming, Developer Tools and more.
-
-Example:
-
-```text
-Choose Services      21 of 105 selected
-
-1. ◐ AI
-2. ○ Music
-3. ○ Social Media
-4. ○ Messaging
-5. ○ Streaming
-...
-
-a  Select All
-n  Select None
-i  Invert Selection
-0  Apply & Back
-```
-
-Supported input formats:
-
-```
-3
-1 5 9
-2-7
-```
-
-Categories containing a single provider (such as **All Google Services**) toggle immediately without opening a submenu.
-
----
-
-### Custom Domains
-
-Add any domain that is not included in the built-in provider database.
-
-Example:
-
-```
-example.com
-api.example.com
-```
-
----
-
-### White Lists
-
-Domains that should never be blocked by the Ad Blocker.
-
-Useful when a website or application requires a tracking or analytics domain to function correctly.
-
----
-
-### Connection
-
-Manage the WARP tunnel itself.
-
-- Change WARP IP
-- Automatic IP Health Monitoring
-- QUIC (HTTP/3) Handling
-
----
-
-### Automation
-
-Automate common maintenance tasks.
-
-- Scheduled WARP restart
-- Route refresh
-
-These features help keep long-running servers healthy without manual intervention.
-
----
-
-### Presets
-
-Move your entire configuration between servers.
-
-A preset includes:
-
-- Selected services
-- Custom domains
-- White list
-- Ad Blocker settings
-- QUIC mode
-- Auto Restart
-- Auto IP Health
-- Optional WARP+ license
-
-Export a preset on one server and import it on another to recreate the same configuration within seconds.
-
----
-
-### WARP+ License
-
-Apply or replace your Cloudflare WARP+ license.
-
-The license is preserved when changing WARP IPs.
-
----
-
-### Status
-
-Display the current system status, including:
-
-- WARP state
-- WARP IP
-- Location
-- Selected services
-- Engine status
-- Ad Blocker status
-
----
-
-### Restart WARP
-
-Restarts only the WARP interface and rebuilds the routing engine.
-
----
-
-### Ad Blocker
-
-Blocks ads and trackers using **uBlock Origin's filter lists** - the same
-catalogue uBlock ships, with the same nine lists enabled by default, plus its
-optional and regional lists (71 in total, selectable from the menu).
-
-Only the domain-expressible rules are used. sing-box sees the domain of each
-connection (TLS SNI / QUIC) and never the URL path or the page DOM, so cosmetic
-filters (`##selector`) and scriptlets (`##+js`) cannot apply server-side. That
-still captures **85% of uBlock's network filters** - about 105,000 domains from
-the default set, or ~128,000 with the optional lists on.
-
-A domain a selected service needs is never blocked: every provider domain is
-subtracted from the block list at build time, and the ad rule is evaluated after
-the routing rules.
-
-Runs locally with no DNS server and no additional services.
-
----
-
-### Restart All Services
-
-Restarts every WARP Manager component, including:
-
-- WARP
-- sing-box
-- nftables rules
-- Background timers
-
----
-
-### Update
-
-Downloads and installs the latest version while preserving your existing configuration.
-
----
-
-### Uninstall
-
-Completely removes WARP Manager, WARP, configuration files and system services.
-
----
-
-## Built-in Providers
-
-WARP Manager includes more than **100 predefined services** organized into practical categories.
-
-Simply select the services you want from the interactive menu — no manual routing rules are required.
-
-| Category | Providers |
-|----------|-----------|
-| 🤖 AI | ChatGPT, Gemini, Claude, Cursor, Copilot, Grok, Perplexity, Midjourney, ElevenLabs, Runway, Suno, Udio, Windsurf and more |
-| 🎵 Music | Spotify, Apple Music, YouTube Music, SoundCloud, Tidal, Deezer, Bandcamp, Amazon Music and more |
-| 🌐 Social Media | X, Instagram, Threads, TikTok, Facebook, Reddit, Pinterest, Bluesky and more |
-| 💬 Messaging | Telegram, Discord, WhatsApp, Signal, LINE, WeChat |
-| 🎬 Streaming | Netflix, Disney+, HBO Max, Apple TV+, Amazon Prime Video, Twitch, Kick and more |
-| 💻 Developer | GitHub, GitLab, Docker Hub, Hugging Face, npm, PyPI, Railway, Render, Vercel and more |
-| 🎮 Gaming | Steam, Epic Games, Riot Games, Battle.net, Xbox, PlayStation Network and more |
-| ☁️ Cloud | AWS, Cloudflare, Azure, DigitalOcean, Google Cloud |
-| 📈 Productivity | Notion, Slack, Zoom, Figma, Canva, Linear, Airtable, Miro |
-| 💳 Payment | PayPal, Stripe, Wise, Revolut |
-| 🟢 Google | All Google services (except YouTube) |
-| 🔵 Microsoft | All Microsoft services |
-| 🟣 Adobe | All Adobe services |
-
----
-
-### Duplicate Providers
-
-Some providers appear in more than one category.
-
-For example:
-
-- WhatsApp
-- WeChat
-
-are listed under both **Messaging** and **Social Media**.
-
-Changing either entry updates the same underlying rule.
-
----
-
-### Custom Providers
-
-Need a service that isn't included?
-
-Simply add your own provider definition and it becomes available inside the menu.
-
-Provider definitions are stored in:
-
-```text
-data/providers/
-```
-
-Categories are defined in:
-
-```text
-data/groups.conf
-```
-
-No source code changes are required.
-
----
-
-## Technical Notes
-
-### Domain-Based Routing
-
-WARP Manager routes traffic by **domain**, not by IP address.
-
-Domains are extracted directly from:
-
-- TLS Server Name Indication (SNI)
-- QUIC ClientHello (HTTP/3)
-
-This allows applications to continue working even when their backend IP addresses or CDNs change.
-
----
-
-### Tunnel Safety
-
-WARP Manager never modifies your existing tunnel or proxy configuration.
-
-It works entirely on the VPS by intercepting outbound HTTPS traffic before it leaves the server.
-
-If the routing engine becomes unavailable, a fail-open watchdog automatically removes the redirect rules so traffic continues through the VPS's normal connection instead of breaking existing tunnels.
-
----
-
-### Automatic Startup
-
-After every reboot, WARP Manager automatically restores:
-
-- WARP
-- sing-box
-- nftables redirect rules
-- Scheduled background services
-
-No manual intervention is required.
-
----
-
-### Ad Blocker
-
-The built-in Ad Blocker combines:
-
-- uBlock Origin's filter lists (`Ad Blocker -> Filter Lists` to choose them)
-- sing-box rule sets
-
-The lists are updated automatically every week.
-
-Failed downloads never replace a previously working list.
-
----
-
-### Auto IP Health
-
-Auto IP Health periodically verifies that the current WARP exit is still usable.
-
-A new WARP IP is requested only when:
-
-- WARP is connected
-- The VPS has normal Internet connectivity
-- The current exit is unavailable or located in a blocked region
-
-To avoid Cloudflare rate limits, IP rotations are automatically limited.
-
----
-
-### Connectivity Checks
-
-Connectivity-check domains used by operating systems remain routed directly.
-
-This prevents Android, Windows, iOS and other clients from reporting false "No Internet" warnings.
-
----
-
-### Updates
-
-Updating WARP Manager preserves:
-
-- Selected services
-- Custom domains
-- White lists
-- WARP account
-- WARP+ license
-- Ad Blocker settings
-- Automation settings
-
-Simply run:
-
-```bash
-sudo warp-manager --update
-```
-
-or run the installer again.
-
----
-
-### Cloudflare Rate Limits
-
-Some VPS providers temporarily receive **HTTP 429** during WARP registration.
-
-If this happens:
-
-- wait a few minutes and restart WARP, or
-- import an existing `wgcf-account.toml` from another server.
-
-The installer completes successfully even when registration is temporarily rate-limited.
-
----
-
-## Uninstall
-
-```bash
-sudo bash uninstall.sh
-
-# or
-
-sudo warp-manager --purge
-```
-
-Both run the same removal and finish by verifying it, so no reboot is needed. Besides
-the files and systemd units, this also clears the parts that exist only in the running
-kernel and used to survive until a restart: the nftables table, the policy-routing
-rules and tables (`51888` / `51890`), the `wgcf` link, any leftover `sing-box` process,
-and the `route_localnet` sysctl.
-
-`net.ipv4.ip_forward` is deliberately left on — the box may be your OpenVPN or NAT
-gateway, and turning it off would drop every user.
-
-If anything could not be removed it is listed instead of being silently ignored;
-`sudo warp-manager --leftovers` reports the same list at any time.
-
-Removes:
-
-- WARP
-- sing-box
-- nftables rules
-- Configuration
-- WARP account
-- Systemd services
 
 ---
 
 ## Acknowledgements
 
-WARP account registration is powered by
-[wgcf](https://github.com/ViRb3/wgcf).
-Special thanks to [ClassicDarkPack](https://github.com/ClassicDarkPack) for helping compile and maintain the YouTube advertising domain lists used by the Ad Blocker feature.
-
----
+WARP account registration is powered by [wgcf](https://github.com/ViRb3/wgcf).
+Special thanks to [ClassicDarkPack](https://github.com/ClassicDarkPack) for helping compile
+and maintain the YouTube advertising domain lists used by the Ad Blocker.
 
 ## Support
 
@@ -626,4 +132,5 @@ Telegram channel: **@BlackProtocols**
 
 ## License
 
-Copyright © 2026 Amin Mohammadi (AminMGMT). Released under the MIT License — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Copyright © 2026 Amin Mohammadi (AminMGMT). Released under the MIT License — see
+[LICENSE](LICENSE) and [NOTICE](NOTICE).
